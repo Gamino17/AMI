@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# venv
+.venv/
+venv/
+env/
+
+# editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# local outputs / runtime
+demo_output.txt
+*.log
+.env
+.env.local
+
+# Claude
+.claude/settings.local.json
+
+# Internal-only: business proposal, financial models, GTM, etc.
+private/
+*.private.md
