@@ -1100,7 +1100,8 @@ def render_landing():
         <div class="bar">
           <span class="dot"></span><span class="dot"></span><span class="dot"></span>
           <div class="tabs" role="tablist">
-            <button class="tab active" data-pane="pane-oneliner" role="tab">One-liner</button>
+            <button class="tab active" data-pane="pane-http" role="tab">HTTP remoto</button>
+            <button class="tab" data-pane="pane-oneliner" role="tab">One-liner</button>
             <button class="tab" data-pane="pane-clone" role="tab">git clone</button>
             <button class="tab" data-pane="pane-claude" role="tab">Claude config</button>
           </div>
@@ -1108,9 +1109,17 @@ def render_landing():
         </div>
 
         <div class="panes">
-          <div class="pane active" id="pane-oneliner">
+          <div class="pane active" id="pane-http">
+            <button class="copy-btn" data-copy="https://ami-mcp-http.onrender.com/mcp/">copy</button>
+<span class="comment"># <span data-lang="es">Recomendado para agentes: cero instalación, cero API key local.</span><span data-lang="en">Recommended for agents: zero install, zero local API key.</span></span>
+<span class="comment"># <span data-lang="es">Apunta tu cliente MCP (transporte streamable-http) a:</span><span data-lang="en">Point your MCP client (streamable-http transport) to:</span></span>
+
+<span class="accent">https://ami-mcp-http.onrender.com/mcp/</span>
+          </div>
+
+          <div class="pane" id="pane-oneliner">
             <button class="copy-btn" data-copy="curl -fsSL https://ami-mock-api.onrender.com/install.sh | sh">copy</button>
-<span class="comment"># <span data-lang="es">Instala AMI en ~/.ami: clona repo, monta venv, instala MCP SDK.</span><span data-lang="en">Installs AMI into ~/.ami: clones repo, builds venv, installs MCP SDK.</span></span>
+<span class="comment"># <span data-lang="es">Instala el MCP en ~/.ami (stdio local). Necesita AMI_API_KEY propia.</span><span data-lang="en">Installs the MCP into ~/.ami (local stdio). Requires your own AMI_API_KEY.</span></span>
 <span class="prompt">$</span> <span class="cmd">curl -fsSL <span class="accent">https://ami-mock-api.onrender.com/install.sh</span> | sh</span>
           </div>
 
@@ -2173,11 +2182,31 @@ AMI expone un MCP server con 11 tools y una REST API JSON. El agente recorre:
 solicitud → oferta → datos cliente → contrato → firma → MobileIdentity activa.
 Lo único simulado actualmente es la SIM física; el resto del flujo es real.
 
-## Conexión
+## Conexión (recomendado para agentes)
 
-- MCP HTTP remoto: {MCP_HTTP_URL}
-- MCP stdio (instalable local): clonar {REPO_URL} y configurar Claude Desktop.
-- Auth REST: header `Authorization: Bearer <AMI_API_KEY>`.
+**Cero instalación, cero API key local — usa el MCP HTTP remoto:**
+
+- URL: {MCP_HTTP_URL}
+- Transporte: streamable-http
+- Auth MCP: ninguna (la API key vive ya en el servidor de Render).
+
+Cualquier cliente MCP que soporte transporte streamable-http se enchufa
+directamente. Esta es la forma recomendada para agentes corriendo en
+máquinas remotas o CI: no requiere clonar el repo, ni instalar Python, ni
+gestionar `AMI_API_KEY` localmente.
+
+## Conexión alternativa (stdio local)
+
+Sólo si el cliente MCP no soporta HTTP remoto:
+
+- Instalador one-liner: `curl -fsSL https://ami-mock-api.onrender.com/install.sh | sh`
+- Repo: {REPO_URL}
+- Requiere setear `AMI_API_KEY` propia para hablar con el backend.
+
+## Acceso REST directo
+
+Para clientes no-MCP, la API REST está documentada en /openapi.json. Auth con
+header `Authorization: Bearer <AMI_API_KEY>`.
 
 ## Tools MCP (namespace ami.*)
 
