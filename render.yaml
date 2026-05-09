@@ -4,7 +4,7 @@ services:
   # ----------------------------------------------------------------------------
   - type: web
     name: ami-mock-api
-    runtime: python3
+    runtime: python
     plan: starter
     buildCommand: ""
     startCommand: "python3 ami_api.py"
@@ -26,7 +26,7 @@ services:
   # ----------------------------------------------------------------------------
   - type: web
     name: ami-mcp-http
-    runtime: python3
+    runtime: python
     plan: starter
     buildCommand: "pip install -r requirements.txt"
     # Render inyecta $PORT; lo reexportamos como AMI_MCP_PORT para que ami_mcp.py
