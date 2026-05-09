@@ -177,6 +177,14 @@ def main() -> None:
                 f"https://{public_host}", f"http://{public_host}",
             ]
 
+        # Stateless: cada llamada es independiente. Imprescindible cuando el
+        # server puede correr en múltiples instancias o reciclar workers
+        # (Render free/starter), porque la sesión por defecto se guarda en
+        # memoria del proceso y se perdería entre requests dando "Session
+        # terminated".
+        mcp.settings.stateless_http = True
+        mcp.settings.json_response = True
+
         import uvicorn
         host = os.environ.get("AMI_MCP_HOST", "0.0.0.0")
         port = int(os.environ.get("AMI_MCP_PORT", "8001"))
