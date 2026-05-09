@@ -161,9 +161,18 @@ def main() -> None:
     if transport == "stdio":
         mcp.run(transport="stdio")
     elif transport == "http":
-        mcp.settings.host = os.environ.get("AMI_MCP_HOST", "0.0.0.0")
-        mcp.settings.port = int(os.environ.get("AMI_MCP_PORT", "8001"))
-        mcp.run(transport="streamable-http")
+        # Monta la ASGI app de FastMCP en uvicorn con proxy headers habilitados
+        # para que el Host venga del X-Forwarded-Host de Render/Cloudflare en lugar
+        # de la conexión interna (que dispararía 421 Misdirected Request).
+        import uvicorn
+        host = os.environ.get("AMI_MCP_HOST", "0.0.0.0")
+        port = int(os.environ.get("AMI_MCP_PORT", "8001"))
+        app = mcp.streamable_http_app()
+        uvicorn.run(
+            app, host=host, port=port,
+            proxy_headers=True, forwarded_allow_ips="*",
+            log_level="info",
+        )
     else:
         print(f"Unknown transport: {transport!r}. Use 'stdio' or 'http'.", file=sys.stderr)
         sys.exit(2)
