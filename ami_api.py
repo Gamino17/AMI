@@ -1447,6 +1447,7 @@ def render_landing():
         statusRunning: 'Ejecutando flujo end-to-end…',
         statusOk:      'Flujo completado',
         statusErr:     'Error',
+        instant:       'instantáneo',
         phoneLbl:      'Número activo',
         midLbl:        'mobile_identity_id',
         viewIdentity:  'Ver identidad pública →',
@@ -1459,6 +1460,7 @@ def render_landing():
         statusRunning: 'Running end-to-end flow…',
         statusOk:      'Flow completed',
         statusErr:     'Error',
+        instant:       'instant',
         phoneLbl:      'Active number',
         midLbl:        'mobile_identity_id',
         viewIdentity:  'View public identity →',
@@ -1475,10 +1477,16 @@ def render_landing():
     }}
 
     function fmtTs(ms) {{
-      // Escala la unidad para no mostrar siempre "0.00s" en flujos <1s.
-      if (ms < 1)    return '+' + (ms * 1000).toFixed(0) + 'µs';
-      if (ms < 1000) return '+' + ms.toFixed(2) + 'ms';
-      return '+' + (ms / 1000).toFixed(2) + 's';
+      // Escala humana: si todo el flujo fue imperceptible, no muestres µs
+      // técnicos por paso; sólo "instantáneo" en el badge final lo cuenta.
+      if (ms < 50)   return '';                                 // sub-perceptual
+      if (ms < 1000) return '+' + Math.round(ms) + 'ms';
+      return '+' + (ms / 1000).toFixed(1) + 's';
+    }}
+    function fmtTotal(ms, labels) {{
+      if (ms < 50)   return labels.instant;
+      if (ms < 1000) return Math.round(ms) + ' ms';
+      return (ms / 1000).toFixed(1) + ' s';
     }}
 
     btn.addEventListener('click', async function() {{
@@ -1516,7 +1524,7 @@ def render_landing():
 
         var L2 = L();
         status.className = 'try-status ok';
-        status.textContent = L2.statusOk + ' · ' + (data.elapsed_ms || 0) + ' ms';
+        status.textContent = L2.statusOk + ' · ' + fmtTotal(total, L2);
 
         var mid = data.mobile_identity || {{}};
         result.innerHTML =
