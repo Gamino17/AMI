@@ -1475,8 +1475,10 @@ def render_landing():
     }}
 
     function fmtTs(ms) {{
-      var s = (ms / 1000).toFixed(2);
-      return '+' + s + 's';
+      // Escala la unidad para no mostrar siempre "0.00s" en flujos <1s.
+      if (ms < 1)    return '+' + (ms * 1000).toFixed(0) + 'µs';
+      if (ms < 1000) return '+' + ms.toFixed(2) + 'ms';
+      return '+' + (ms / 1000).toFixed(2) + 's';
     }}
 
     btn.addEventListener('click', async function() {{
