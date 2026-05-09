@@ -161,9 +161,22 @@ def main() -> None:
     if transport == "stdio":
         mcp.run(transport="stdio")
     elif transport == "http":
-        # Monta la ASGI app de FastMCP en uvicorn con proxy headers habilitados
-        # para que el Host venga del X-Forwarded-Host de Render/Cloudflare en lugar
-        # de la conexión interna (que dispararía 421 Misdirected Request).
+        # FastMCP activa DNS-rebinding protection por defecto y solo permite
+        # hosts/origenes localhost. En producción detrás de un proxy hay que
+        # añadir el hostname público a allowed_hosts (Render lo expone como
+        # RENDER_EXTERNAL_HOSTNAME) o pasarlo explícito vía AMI_MCP_PUBLIC_HOST.
+        # Sin esto, el server responde 421 "Invalid Host header" a Cloudflare.
+        public_host = (
+            os.environ.get("AMI_MCP_PUBLIC_HOST")
+            or os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+        )
+        if public_host:
+            ts = mcp.settings.transport_security
+            ts.allowed_hosts = list(ts.allowed_hosts) + [public_host, f"{public_host}:*"]
+            ts.allowed_origins = list(ts.allowed_origins) + [
+                f"https://{public_host}", f"http://{public_host}",
+            ]
+
         import uvicorn
         host = os.environ.get("AMI_MCP_HOST", "0.0.0.0")
         port = int(os.environ.get("AMI_MCP_PORT", "8001"))
