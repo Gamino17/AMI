@@ -262,7 +262,8 @@ def run_quick_demo():
     req["mobile_identity_id"] = mid
     steps.append({"step": "mobile_identity_active", "id": mid, "phone_number": phone})
 
-    elapsed_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
+    # round(.., 2) preserva fracciones <1ms en lugar de truncar a 0; floor a 0.01.
+    elapsed_ms = max(0.01, round((datetime.now(timezone.utc) - t0).total_seconds() * 1000, 2))
     return {
         "ok": True,
         "elapsed_ms": elapsed_ms,
@@ -1163,8 +1164,8 @@ def render_landing():
       </div>
 
       <p class="qs-foot">
-        <span data-lang="es">El one-liner instala todo (repo, Python venv, dependencias) y deja el MCP server listo. Después pega el bloque de <code>Claude config</code> en tu <code>claude_desktop_config.json</code> y reinicia: las 11 tools <code>ami.*</code> aparecerán en tu agente.</span>
-        <span data-lang="en">The one-liner installs everything (repo, Python venv, dependencies) and leaves the MCP server ready. Then paste the <code>Claude config</code> block into your <code>claude_desktop_config.json</code> and restart: the 11 <code>ami.*</code> tools will appear in your agent.</span>
+        <span data-lang="es">Las cuatro vías llegan al mismo MCP server con las 11 tools <code>ami.*</code>. <strong>HTTP remoto</strong> es la opción recomendada para agentes: cero instalación y sin gestionar API key local. Las otras vías son útiles cuando necesitas el MCP corriendo en local (clientes que solo soportan stdio, entornos sin red saliente, etc.).</span>
+        <span data-lang="en">All four paths reach the same MCP server with the 11 <code>ami.*</code> tools. <strong>Remote HTTP</strong> is the recommended option for agents: zero install, no local API key to manage. The other paths are useful when you need the MCP running locally (stdio-only clients, no-egress environments, etc.).</span>
       </p>
 
       <!-- Try in browser ============================================ -->

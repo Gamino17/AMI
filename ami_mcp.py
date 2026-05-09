@@ -186,9 +186,65 @@ def main() -> None:
         mcp.settings.json_response = True
 
         import uvicorn
+        from starlette.responses import HTMLResponse
+        from starlette.routing import Route
+
         host = os.environ.get("AMI_MCP_HOST", "0.0.0.0")
         port = int(os.environ.get("AMI_MCP_PORT", "8001"))
+        landing_url = os.environ.get("AMI_API_URL", "https://ami-mock-api.onrender.com")
+
+        # Página HTML amable para humanos que llegan al MCP server por curiosidad.
+        # Servida en GET / (raíz) y como fallback para GET /mcp con Accept: text/html.
+        page = (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>AMI MCP Server</title>"
+            "<style>"
+            "body{font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',sans-serif;"
+            "background:#08080c;color:#ededf2;display:flex;align-items:center;justify-content:center;"
+            "min-height:100vh;margin:0;padding:1.5rem;line-height:1.6}"
+            ".box{max-width:560px;text-align:center}"
+            "h1{font-weight:700;font-size:2rem;margin:0 0 1rem;letter-spacing:-0.02em}"
+            "h1 .dot{color:#8b6cff}"
+            "p{color:#8888a0;margin:0 0 1.5rem}"
+            "code{font-family:'JetBrains Mono','SF Mono',Menlo,monospace;background:#14141d;"
+            "border:1px solid #1f1f2c;padding:0.15em 0.5em;border-radius:4px;color:#5dd1ff;font-size:0.9em}"
+            ".pill{display:inline-block;font-family:'JetBrains Mono','SF Mono',Menlo,monospace;"
+            "font-size:0.72rem;background:#14141d;border:1px solid #1f1f2c;color:#8888a0;"
+            "padding:0.3rem 0.7rem;border-radius:999px;margin-bottom:1.5rem;letter-spacing:0.05em}"
+            ".btn{display:inline-block;background:linear-gradient(180deg,#9d80ff,#7a5cff);"
+            "color:#fff;text-decoration:none;padding:0.7rem 1.4rem;border-radius:8px;"
+            "font-weight:500;margin-top:1rem;box-shadow:0 8px 24px -8px rgba(123,92,255,0.5)}"
+            "</style></head><body><div class=\"box\">"
+            "<div class=\"pill\">MCP HTTP server</div>"
+            "<h1>AMI<span class=\"dot\">.</span></h1>"
+            "<p>This URL is the <strong>streamable-http MCP endpoint</strong> for AI agents, "
+            "not a website. Point any MCP-compatible client (Claude Desktop, OpenClaw, "
+            "custom SDK, etc.) at <code>/mcp</code> and it will see the 11 <code>ami.*</code> tools.</p>"
+            "<p>If you arrived here from a browser, you probably want the AMI landing page:</p>"
+            f"<a class=\"btn\" href=\"{landing_url}\">Go to ami-mock-api &rarr;</a>"
+            "</div></body></html>"
+        )
+
+        async def root(request):
+            return HTMLResponse(page)
+
+        async def mcp_browser(request):
+            # GET /mcp con Accept: text/html → landing amable; otros casos → 405
+            # (los POSTs reales del MCP los maneja el handler de FastMCP montado abajo).
+            if "text/html" in request.headers.get("accept", ""):
+                return HTMLResponse(page)
+            return HTMLResponse(
+                "Method Not Allowed (use POST with Accept: application/json, text/event-stream)",
+                status_code=405,
+            )
+
         app = mcp.streamable_http_app()
+        # Inserta las rutas amables al principio para que tengan prioridad sobre
+        # cualquier 404 catch-all del app de FastMCP.
+        app.routes.insert(0, Route("/", root, methods=["GET"]))
+        app.routes.insert(1, Route("/mcp", mcp_browser, methods=["GET"]))
+
         uvicorn.run(
             app, host=host, port=port,
             proxy_headers=True, forwarded_allow_ips="*",
