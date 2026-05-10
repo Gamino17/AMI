@@ -163,19 +163,29 @@ def main() -> None:
     elif transport == "http":
         # FastMCP activa DNS-rebinding protection por defecto y solo permite
         # hosts/origenes localhost. En producción detrás de un proxy hay que
-        # añadir el hostname público a allowed_hosts (Render lo expone como
-        # RENDER_EXTERNAL_HOSTNAME) o pasarlo explícito vía AMI_MCP_PUBLIC_HOST.
+        # añadir TODOS los hostnames públicos a allowed_hosts. Aceptamos:
+        #   - RENDER_EXTERNAL_HOSTNAME (Render lo expone, p.ej. ami-mcp-http.onrender.com)
+        #   - AMI_MCP_PUBLIC_HOST: lista separada por comas con dominios custom
+        #     (p.ej. mcp.protocolami.com,otrodominio.com)
         # Sin esto, el server responde 421 "Invalid Host header" a Cloudflare.
-        public_host = (
-            os.environ.get("AMI_MCP_PUBLIC_HOST")
-            or os.environ.get("RENDER_EXTERNAL_HOSTNAME")
-        )
-        if public_host:
+        hosts_to_allow = []
+        render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+        if render_host:
+            hosts_to_allow.append(render_host)
+        custom = os.environ.get("AMI_MCP_PUBLIC_HOST", "")
+        for h in custom.split(","):
+            h = h.strip()
+            if h:
+                hosts_to_allow.append(h)
+
+        if hosts_to_allow:
             ts = mcp.settings.transport_security
-            ts.allowed_hosts = list(ts.allowed_hosts) + [public_host, f"{public_host}:*"]
-            ts.allowed_origins = list(ts.allowed_origins) + [
-                f"https://{public_host}", f"http://{public_host}",
-            ]
+            extra_hosts, extra_origins = [], []
+            for h in hosts_to_allow:
+                extra_hosts += [h, f"{h}:*"]
+                extra_origins += [f"https://{h}", f"http://{h}"]
+            ts.allowed_hosts = list(ts.allowed_hosts) + extra_hosts
+            ts.allowed_origins = list(ts.allowed_origins) + extra_origins
 
         # Stateless: cada llamada es independiente. Imprescindible cuando el
         # server puede correr en múltiples instancias o reciclar workers
