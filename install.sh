@@ -1,7 +1,7 @@
 #!/bin/sh
 # AMI installer — sets up the MCP server in ~/.ami so any agent can connect.
 # Usage:
-#   curl -fsSL https://ami-mock-api.onrender.com/install.sh | sh
+#   curl -fsSL https://protocolami.com/install.sh | sh
 #   AMI_HOME=/custom/path curl -fsSL https://... | sh
 #
 # Auto-wire into Claude Desktop's claude_desktop_config.json:
@@ -16,7 +16,7 @@ set -e
 
 REPO="${AMI_REPO:-https://github.com/Gamino17/AMI}"
 DEST="${AMI_HOME:-$HOME/.ami}"
-API_URL="${AMI_API_URL:-https://ami-mock-api.onrender.com}"
+API_URL="${AMI_API_URL:-https://protocolami.com}"
 
 # wire flag: --wire / --wire-claude or AMI_WIRE_CLAUDE=1
 WIRE="${AMI_WIRE_CLAUDE:-0}"

@@ -191,7 +191,7 @@ def main() -> None:
 
         host = os.environ.get("AMI_MCP_HOST", "0.0.0.0")
         port = int(os.environ.get("AMI_MCP_PORT", "8001"))
-        landing_url = os.environ.get("AMI_API_URL", "https://ami-mock-api.onrender.com")
+        landing_url = os.environ.get("AMI_API_URL", "https://protocolami.com")
 
         # Página HTML amable para humanos que llegan al MCP server por curiosidad.
         # Servida en GET / (raíz) y como fallback para GET /mcp con Accept: text/html.

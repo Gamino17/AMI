@@ -94,7 +94,7 @@ Añade al `claude_desktop_config.json`:
       "command": "/Users/danielgaminocano/Developer/AMI/.venv/bin/python",
       "args": ["/Users/danielgaminocano/Developer/AMI/ami_mcp.py"],
       "env": {
-        "AMI_API_URL": "https://ami-mock-api.onrender.com",
+        "AMI_API_URL": "https://protocolami.com",
         "AMI_API_KEY": "<tu-api-key>"
       }
     }
@@ -109,7 +109,7 @@ Reinicia el cliente y las 11 tools `ami.*` quedan disponibles para el agente.
 Desde un cliente MCP que soporte transporte streamable-http, apunta a:
 
 ```
-https://ami-mcp-http.onrender.com/mcp/      # remoto (Render expone en 443)
+https://mcp.protocolami.com/mcp/      # remoto (Render expone en 443)
 http://localhost:8001/mcp/                  # local
 ```
 

@@ -15,8 +15,10 @@ services:
       # Secreto: generar con `openssl rand -hex 32` y pegar en el dashboard.
       - key: AMI_API_KEY
         sync: false
-      # URL pública del propio servicio (p.ej. https://ami-mock-api.onrender.com).
-      # Setear manualmente desde el dashboard tras el primer deploy.
+      # URL pública del propio servicio (p.ej. https://protocolami.com una vez
+      # configurado el custom domain, o https://ami-mock-api.onrender.com mientras
+      # no haya dominio propio). Setear manualmente desde el dashboard tras el
+      # primer deploy.
       - key: AMI_PUBLIC_URL
         sync: false
 
@@ -36,7 +38,8 @@ services:
       - key: AMI_MCP_HOST
         value: 0.0.0.0
       # URL pública del primer servicio. Setear manualmente tras el primer deploy
-      # (p.ej. https://ami-mock-api.onrender.com). No usamos fromService porque
+      # (p.ej. https://protocolami.com con custom domain, o
+      # https://ami-mock-api.onrender.com sin él). No usamos fromService porque
       # para servicios web Render expone host público vía HTTPS y resulta más
       # predecible pegar la URL completa que componerla con propiedades internas.
       - key: AMI_API_URL

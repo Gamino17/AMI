@@ -41,7 +41,7 @@ En **Environment** del servicio `ami-mock-api`:
   ```
 - `AMI_PUBLIC_URL`: la URL pública que Render asignó al servicio. La verás
   arriba a la derecha del propio dashboard del servicio. Suele ser
-  `https://ami-mock-api.onrender.com` (sin barra final).
+  `https://protocolami.com` (sin barra final).
 
 Tras guardar, Render hace redeploy automático.
 
@@ -51,7 +51,7 @@ En **Environment** del servicio `ami-mcp-http`:
 
 - `AMI_API_URL`: la URL pública del primer servicio
   (la misma de `AMI_PUBLIC_URL` de arriba, p.ej.
-  `https://ami-mock-api.onrender.com`).
+  `https://protocolami.com`).
 - `AMI_API_KEY`: la **misma** clave que pegaste en `ami-mock-api`. El MCP la
   envía como `Authorization: Bearer ...` al API.
 
@@ -102,7 +102,7 @@ que hace POST al callback público y deja el contrato en estado `signed`.
   README para el snippet exacto.
 - **HTTP remoto**: cualquier cliente MCP que soporte transporte
   `streamable-http` puede conectarse directamente a
-  `https://ami-mcp-http.onrender.com/mcp` (sin instalar nada localmente).
+  `https://mcp.protocolami.com/mcp` (sin instalar nada localmente).
   Recuerda que el MCP HTTP necesita la misma `AMI_API_KEY` configurada en su
   entorno para hablar con el API.
 

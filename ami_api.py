@@ -74,7 +74,7 @@ except FileNotFoundError:
 
 # Configuración pública (URLs que aparecen en la landing y en /llms.txt).
 REPO_URL = os.environ.get("AMI_REPO_URL", "https://github.com/Gamino17/AMI")
-MCP_HTTP_URL = os.environ.get("AMI_MCP_HTTP_URL", "https://ami-mcp-http.onrender.com/mcp/")
+MCP_HTTP_URL = os.environ.get("AMI_MCP_HTTP_URL", "https://mcp.protocolami.com/mcp/")
 
 
 def is_public(method, path):
@@ -975,7 +975,7 @@ def render_landing():
                 "command": "python3",
                 "args": ["/path/to/AMI/ami_mcp.py"],
                 "env": {
-                    "AMI_API_URL": "https://ami-mock-api.onrender.com",
+                    "AMI_API_URL": "https://protocolami.com",
                     "AMI_API_KEY": "<your-api-key>"
                 }
             }
@@ -1111,17 +1111,17 @@ def render_landing():
 
         <div class="panes">
           <div class="pane active" id="pane-http">
-            <button class="copy-btn" data-copy="https://ami-mcp-http.onrender.com/mcp/">copy</button>
+            <button class="copy-btn" data-copy="https://mcp.protocolami.com/mcp/">copy</button>
 <span class="comment"># <span data-lang="es">Recomendado para agentes: cero instalación, cero API key local.</span><span data-lang="en">Recommended for agents: zero install, zero local API key.</span></span>
 <span class="comment"># <span data-lang="es">Apunta tu cliente MCP (transporte streamable-http) a:</span><span data-lang="en">Point your MCP client (streamable-http transport) to:</span></span>
 
-<span class="accent">https://ami-mcp-http.onrender.com/mcp/</span>
+<span class="accent">https://mcp.protocolami.com/mcp/</span>
           </div>
 
           <div class="pane" id="pane-oneliner">
-            <button class="copy-btn" data-copy="curl -fsSL https://ami-mock-api.onrender.com/install.sh | sh">copy</button>
+            <button class="copy-btn" data-copy="curl -fsSL https://protocolami.com/install.sh | sh">copy</button>
 <span class="comment"># <span data-lang="es">Instala el MCP en ~/.ami (stdio local). Necesita AMI_API_KEY propia.</span><span data-lang="en">Installs the MCP into ~/.ami (local stdio). Requires your own AMI_API_KEY.</span></span>
-<span class="prompt">$</span> <span class="cmd">curl -fsSL <span class="accent">https://ami-mock-api.onrender.com/install.sh</span> | sh</span>
+<span class="prompt">$</span> <span class="cmd">curl -fsSL <span class="accent">https://protocolami.com/install.sh</span> | sh</span>
           </div>
 
           <div class="pane" id="pane-clone">
@@ -1140,7 +1140,7 @@ def render_landing():
       "command": "/Users/you/.ami/.venv/bin/python",
       "args": ["/Users/you/.ami/ami_mcp.py"],
       "env": {{
-        "AMI_API_URL": "https://ami-mock-api.onrender.com",
+        "AMI_API_URL": "https://protocolami.com",
         "AMI_API_KEY": "your-api-key"
       }}
     }}
@@ -1153,7 +1153,7 @@ def render_landing():
       <span class="accent">"command"</span>: "/Users/you/.ami/.venv/bin/python",
       <span class="accent">"args"</span>: ["/Users/you/.ami/ami_mcp.py"],
       <span class="accent">"env"</span>: {{
-        <span class="accent">"AMI_API_URL"</span>: "https://ami-mock-api.onrender.com",
+        <span class="accent">"AMI_API_URL"</span>: "https://protocolami.com",
         <span class="accent">"AMI_API_KEY"</span>: "&lt;your-api-key&gt;"
       }}
     }}
@@ -2210,7 +2210,7 @@ gestionar `AMI_API_KEY` localmente.
 
 Sólo si el cliente MCP no soporta HTTP remoto:
 
-- Instalador one-liner: `curl -fsSL https://ami-mock-api.onrender.com/install.sh | sh`
+- Instalador one-liner: `curl -fsSL https://protocolami.com/install.sh | sh`
 - Repo: {REPO_URL}
 - Requiere setear `AMI_API_KEY` propia para hablar con el backend.
 
@@ -2248,7 +2248,7 @@ def render_openapi():
             "description": "API REST para contratación y aprovisionamiento de identidad móvil para agentes AI.",
             "contact": {"url": REPO_URL},
         },
-        "servers": [{"url": "https://ami-mock-api.onrender.com", "description": "Mock público"}],
+        "servers": [{"url": "https://protocolami.com", "description": "Mock público"}],
         "components": {
             "securitySchemes": {
                 "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "AMI_API_KEY"}
