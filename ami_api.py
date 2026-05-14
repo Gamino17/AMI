@@ -3501,8 +3501,8 @@ def render_experience_page():
         Un protocolo abierto y una pila propia, de extremo a extremo: cualquier agente AI
         obtiene un número de teléfono real, firma un contrato, y opera SMS y llamadas
         sobre nuestra propia plataforma cloud — Asterisk, Kannel, SIP gateway, inventario
-        de numeración. Sin SIMs físicas, sin Twilio, sin depender de operadores. La telco
-        cloud-native de los agentes.
+        de numeración. Sin SIMs físicas, sin dependencias externas, sin operadores
+        intermedios. La telco cloud-native de los agentes.
       </p>
       <div class="hero-ctas">
         <a class="btn btn-primary" href="#demo">Ver una identidad creándose →</a>
@@ -3546,7 +3546,7 @@ def render_experience_page():
         <canvas id="netCanvas"></canvas>
       </div>
       <div class="net-legend">
-        <span><span class="dot agent"></span>Agentes (Claude · OpenAI · OpenClaw · custom)</span>
+        <span><span class="dot agent"></span>Agentes (asistentes · soporte · ventas · ops · custom)</span>
         <span><span class="dot ami"></span>AMI Stack (protocolo + plataforma propia)</span>
       </div>
     </div>
@@ -3646,7 +3646,7 @@ def render_experience_page():
       <div class="eyebrow reveal">stack vertical propio</div>
       <h2 class="section-title reveal">Todo bajo <span class="grad">nuestro control</span>.</h2>
       <p class="section-sub reveal" style="margin: 0 auto;">
-        AMI no es un wrapper de Twilio ni un revendedor de operadores. Las tres capas
+        AMI es producto y operación, no integración encima de otro. Las tres capas
         que necesita un agente para tener identidad móvil real son código y servidores
         nuestros. El peering al PSTN se resuelve como interconnect estándar, igual que
         cualquier operador del mundo.
@@ -3710,22 +3710,22 @@ def render_experience_page():
       <div class="eyebrow reveal">canal de distribución</div>
       <h2 class="section-title reveal">Incluido en tu <span class="grad">hosting</span>, por defecto.</h2>
       <p class="section-sub reveal" style="margin: 0 auto;">
-        Cada vez más providers despliegan agentes AI como producto. AMI se integra como
-        <strong>bundle</strong> en su plan: el cliente paga +1 € al mes y recibe número,
-        API cableada y compliance desde el primer arranque. Cero configuración.
+        Cada vez más plataformas de hosting despliegan agentes AI como producto. AMI
+        se integra como <strong>bundle</strong> en su plan: el cliente paga +1 € al mes
+        y recibe número, API cableada y compliance desde el primer arranque. Cero
+        configuración.
       </p>
 
       <div class="bundle-flow reveal-stagger">
         <div class="bundle-card amber">
-          <div class="bundle-tag">providers</div>
+          <div class="bundle-tag">canal de distribución</div>
           <div class="bundle-providers">
-            <span>Hostinger</span>
-            <span>Vercel</span>
-            <span>Replit</span>
-            <span>Railway</span>
-            <span>…</span>
+            <span>hosting</span>
+            <span>cloud agents</span>
+            <span>plataformas</span>
+            <span>marketplaces</span>
           </div>
-          <div class="bundle-meta">despliegan agentes AI en sus planes</div>
+          <div class="bundle-meta">despliegan agentes AI a escala como parte de su producto</div>
         </div>
         <div class="bundle-arrow">→</div>
         <div class="bundle-card violet">
@@ -3744,7 +3744,7 @@ def render_experience_page():
       <div class="bundle-stats reveal-stagger">
         <div class="bundle-stat">
           <div class="bundle-stat-num"><span class="accent-grad">100k+</span></div>
-          <div class="bundle-stat-label">agentes desplegados solo en Hostinger, hoy. Cada uno sin número.</div>
+          <div class="bundle-stat-label">agentes ya desplegados en un solo proveedor de hosting visible · cada uno sin número.</div>
         </div>
         <div class="bundle-stat">
           <div class="bundle-stat-num">0 €</div>
@@ -3813,7 +3813,7 @@ def render_experience_page():
 
         <div class="cinema-actor agent" id="actAgent">
           <div class="cinema-actor-icon">◉</div>
-          <div class="cinema-actor-name">Demerzel</div>
+          <div class="cinema-actor-name">Agente</div>
           <div class="cinema-actor-meta" id="agentMeta">agente AI</div>
           <div class="cinema-bubble" id="agentBubble"></div>
         </div>
@@ -3963,7 +3963,7 @@ def render_experience_page():
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
-    const agentLabels = ['Claude', 'OpenAI', 'OpenClaw', 'Custom', 'Cursor', 'Hermes'];
+    const agentLabels = ['Asistente', 'Soporte', 'Ventas', 'Ops', 'Recordatorios', 'Custom'];
     // Plataforma propia (capa 3 del stack, todo bajo control de AMI)
     const platformLabels = ['Asterisk', 'Kannel', 'Numbers', 'SIP gateway'];
     let nodes = [];
@@ -3975,7 +3975,7 @@ def render_experience_page():
       // para que los labels no se salgan del canvas y se vea más limpio.
       const isMobile = W < 600;
       const agents = isMobile
-        ? ['Claude', 'OpenAI', 'OpenClaw', 'Custom']
+        ? ['Asistente', 'Soporte', 'Ventas', 'Ops']
         : agentLabels;
       const platforms = isMobile
         ? ['Asterisk', 'Kannel', 'Numbers']

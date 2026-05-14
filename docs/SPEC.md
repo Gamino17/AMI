@@ -42,7 +42,7 @@ AMI v1 cubre **contratación y aprovisionamiento**. La operación posterior (lla
     "country": "ES",
     "capabilities": ["voice", "sms"],
     "purpose": "agent_identity",
-    "agent_name": "Demerzel"
+    "agent_name": "Agente01"
   }
 }
 ```
@@ -121,7 +121,7 @@ AMI v1 cubre **contratación y aprovisionamiento**. La operación posterior (lla
   },
   "agent": {
     "agent_id": "demerzel",
-    "display_name": "Demerzel",
+    "display_name": "Agente01",
     "role": "business_assistant"
   },
   "capabilities": ["voice", "sms"],
@@ -413,7 +413,7 @@ Reglas:
 
 ### 7.7 Ejemplo completo paso a paso
 
-Caso: contratar una eSIM española para un agente "Demerzel" con SMS y llamadas, máximo 10 €/mes.
+Caso: contratar una eSIM española para un agente "Agente01" con SMS y llamadas, máximo 10 €/mes.
 
 **1. El agente llama al MCP**
 
@@ -422,7 +422,7 @@ ami.request_sim_offer({
   "country": "ES",
   "sim_type": "eSIM",
   "capabilities": ["sms", "voice"],
-  "agent_name": "Demerzel",
+  "agent_name": "Agente01",
   "max_monthly_price": 10,
   "currency": "EUR"
 })
@@ -439,7 +439,7 @@ Content-Type: application/json
   "country": "ES",
   "sim_type": "eSIM",
   "capabilities": ["sms", "voice"],
-  "agent": {"name": "Demerzel", "purpose": "agent_identity"},
+  "agent": {"name": "Agente01", "purpose": "agent_identity"},
   "commercial_constraints": {"max_monthly_price": 10, "currency": "EUR"}
 }
 ```

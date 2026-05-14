@@ -9,22 +9,22 @@
 
 ## En una frase
 
-> AMI controla la pila completa: el protocolo que hablan los agentes, la plataforma de aplicación, la infraestructura de comunicaciones (softswitch, SMSC, provisioning de números, SIP gateway) y la operación. No somos un wrapper de Twilio ni un revendedor de operadores. Somos la telco cloud-native de los agentes AI — números propios, SMS y voz por internet, sin SIMs físicas.
+> AMI controla la pila completa: el protocolo que hablan los agentes, la plataforma de aplicación, la infraestructura de comunicaciones (softswitch, SMSC, provisioning de números, SIP gateway) y la operación. AMI es producto y operación propios, no integración encima de nadie. Es la telco cloud-native de los agentes AI — números propios, SMS y voz por internet, sin SIMs físicas.
 
 ---
 
 ## Por qué controlamos el stack entero
 
-La industria del software para agentes está naciendo y casi todos los actores nuevos cometen el mismo error estratégico: **construir el producto encima de Twilio o de un operador tradicional**. Eso convierte a la empresa en un middleware que vive del margen que le deja el proveedor de turno y nunca llega a controlar su economía, ni su roadmap, ni su defensibilidad.
+La industria del software para agentes está naciendo y casi todos los actores nuevos cometen el mismo error estratégico: **construir el producto encima de APIs de terceros o de un operador tradicional**. Eso convierte a la empresa en un middleware que vive del margen que le deja el proveedor de turno y nunca llega a controlar su economía, ni su roadmap, ni su defensibilidad.
 
 AMI hace lo contrario. Cada capa, desde el protocolo MCP que ve el agente hasta el softswitch que origina la llamada, es código y servidores **nuestros**. El peering físico al PSTN se resuelve como interconnect estándar, igual que cualquier operador del mundo — es operación, no producto.
 
 El resultado:
 
-- **Márgenes propios.** No pagamos rent-seeking a Twilio, Vonage o un operador retail. Lo que cobramos al cliente es nuestro margen, no la sobra que nos deja un intermediario.
+- **Márgenes propios.** No pagamos rent-seeking a intermediarios ni a operadores retail. Lo que cobramos al cliente es nuestro margen completo.
 - **Velocidad.** Cualquier feature que necesite ajustes en el softswitch, en el SMSC o en el SIP gateway la hacemos en horas. Sin esperar al roadmap de un proveedor externo.
-- **Defensibilidad.** Si mañana Twilio decide bajar precios para matar competencia o un operador retira su API, no nos afecta. Nuestro stack sigue vivo.
-- **Features que Twilio no puede.** Tools MCP nativas, política por agente, auditoría inmutable, contratos firmados vinculados a número, identidad gobernada — todo se puede integrar profundo porque controlamos todas las capas.
+- **Defensibilidad.** Si mañana cualquier API externa cambia precio o desaparece, no nos afecta. Nuestro stack sigue vivo.
+- **Features integradas profundo.** Tools MCP nativas, política por agente, auditoría inmutable, contratos firmados vinculados a número, identidad gobernada — todo se puede integrar profundo porque controlamos todas las capas. Nada de esto se puede hacer encima de APIs de terceros.
 
 ---
 
@@ -38,7 +38,7 @@ flowchart TB
   classDef ami    fill:#1a1a24,stroke:#8b6cff,color:#ededf2,stroke-width:2px
   classDef world  fill:#1a1a24,stroke:#4ade80,color:#ededf2,stroke-width:1px
 
-  A["Agentes AI · mundo<br/>Claude · OpenAI · OpenClaw · agentes propietarios<br/>via MCP / REST"]:::agents
+  A["Agentes AI · mundo<br/>asistentes · soporte · ventas · agentes propietarios<br/>via MCP / REST"]:::agents
 
   subgraph AMI_STACK["AMI · stack vertical bajo nuestro control"]
     direction TB
@@ -171,7 +171,7 @@ No estamos describiendo un proyecto futuro. Hay piezas en producción y piezas e
 - **Capa 1 completa**: MCP server con 11 tools `ami.*` y REST API con 18 endpoints, ambos accesibles públicamente en `https://protocolami.com` y `https://mcp.protocolami.com/mcp/`.
 - **Capa 2 parcial**: contratos generados, firma electrónica vía página propia, audit log con cada transición de estado, máquina de estados explícita.
 - **Suite de tests pytest** con 58 verificaciones del contrato público.
-- **Validado con agentes externos**: OpenClaw conectado desde otra máquina vía Telegram ha ejecutado el flujo completo end-to-end.
+- **Validado con agentes externos**: un agente conectado desde otra máquina vía un canal de mensajería ha ejecutado el flujo completo end-to-end sin asistencia humana.
 
 ### En construcción (próximas semanas)
 
@@ -193,7 +193,7 @@ No estamos describiendo un proyecto futuro. Hay piezas en producción y piezas e
 
 ## Canal de distribución · bundles con hosting providers
 
-Hay una oportunidad masiva y poco evidente: los proveedores de hosting (Hostinger, Vercel, Railway, Render, Cloudflare, Fly.io, …) ya están vendiendo **agentes AI desplegados como servicio**. Hostinger anuncia hoy más de **100.000 agentes OpenClaw desplegados** en sus planes. Replit, Vercel y Railway están detrás con jugadas equivalentes.
+Hay una oportunidad masiva y poco evidente: los **proveedores de hosting** ya están vendiendo **agentes AI desplegados como servicio**. Uno solo de ellos, públicamente, anuncia más de **100.000 agentes desplegados** en sus planes; varias plataformas cloud están moviéndose en la misma dirección.
 
 Estos agentes nacen con todo lo que necesitan para operar en cloud — **excepto un número de teléfono propio**. Ningún hosting provider tiene infraestructura telco. Es el hueco perfecto para AMI.
 
@@ -217,7 +217,7 @@ flowchart LR
   classDef parallax fill:#1a1a24,stroke:#8b6cff,color:#ededf2,stroke-width:2px
 
   C["Cliente final<br/>(compra plan con agente)"]:::customer
-  H["Hosting provider<br/>(Hostinger · Vercel · Railway · …)"]:::provider
+  H["Hosting provider<br/>(plataforma cloud que despliega agentes)"]:::provider
   AMI["AMI Stack<br/>(número + API + compliance)"]:::parallax
 
   C -->|plan + 1 €/mes bundle| H
@@ -231,23 +231,25 @@ flowchart LR
 
 ### Por qué esto es asimétrico a nuestro favor
 
-- **Distribución gratuita a escala masiva.** Si Hostinger lo activa por defecto, son ~100K nuevos clientes anuales con identidad AMI sin nuestro coste de marketing.
+- **Distribución gratuita a escala masiva.** Si un solo hosting provider grande lo activa por defecto, son ~100K nuevos clientes anuales con identidad AMI sin nuestro coste de marketing.
 - **Adquisición casi-cero.** El cliente ya pagó por su agente; +1 €/mes por un número operativo real es marginal frente al resto del plan.
 - **Lock-in suave.** Una vez el agente tiene su número con compliance y audit log, migrarlo es trabajo. Quien arranque con AMI se queda con AMI.
-- **Multi-provider desde el día uno.** No es exclusivo con nadie; lo ofrecemos a cada hosting que monetiza agentes. Cada bundle es independiente.
+- **Multi-provider desde el día uno.** No es exclusivo con nadie; lo ofrecemos a cada plataforma que monetiza agentes. Cada bundle es independiente.
 - **Negocio recurrente, no proyecto.** No vendemos "una integración" — vendemos un canal vivo con margen mensual.
 
-### Quién tiene este modelo hoy
+### Hay precedentes
 
-- **Stripe + Shopify** — el ejemplo paradigmático: cada tienda Shopify viene Stripe-ready, Stripe captura todo el comercio.
-- **Twilio + Shopify Plus** — comunicaciones "transparentes" para el merchant.
-- **Cloudflare + Vercel** — bundles cross-vendor por defecto.
+El modelo de "infraestructura como pieza por defecto de la plataforma" lleva una década probado:
 
-Para **agentes AI con número de teléfono real**, este modelo no lo tiene nadie todavía. La ventana se cierra cuando alguien (probablemente Twilio o Vonage) lo cierre primero con uno de los hosting players grandes. Hablar ahora con Hostinger, Vercel y Railway es la jugada.
+- En **fintech**, el procesador de pagos por defecto integrado en la mayor plataforma de e-commerce.
+- En **infraestructura web**, las CDN y servicios de edge integrados de fábrica en los hosting cloud-native.
+- En **comunicaciones**, las APIs de mensajería ya transparentes en algunos SaaS B2B grandes.
+
+Para **agentes AI con número de teléfono real**, este modelo no lo tiene nadie todavía. La ventana se cierra cuando un competidor lo cierre primero con uno de los hosting players grandes. Moverse ahora es la jugada.
 
 ### Cómo arrancar
 
-1. Identificar el primer provider piloto. Hostinger es el candidato natural dado el volumen visible (100K+ agentes anunciados) y que su producto **OpenClaw managed** ya tiene cliente final cautivo esperando funcionalidades.
+1. Identificar el primer provider piloto. El candidato natural es el hosting cloud que más visiblemente está vendiendo agentes desplegados (volumen anunciado público de 100K+ agentes ya en producción), con cliente final cautivo esperando capacidades extra.
 2. API simple expuesta por AMI: `POST /v1/partners/{partner_id}/provision` que toma `customer_ref` + `country` y devuelve `phone_number` + `credentials`. Una sola llamada. Documentación y ejemplo de integración listos en una semana.
 3. Bundle de marca opcional: "Powered by AMI" en el dashboard del partner, o invisible si prefieren branding propio.
 4. Pricing: comisión revenue share sobre el bundle, sin cuotas mínimas iniciales para reducir fricción del partner. Ajustable cuando el volumen lo justifique.
@@ -257,7 +259,7 @@ Para **agentes AI con número de teléfono real**, este modelo no lo tiene nadie
 ## Por qué este momento
 
 - **MCP se está convirtiendo en el estándar** de cómo los agentes hablan con servicios externos. Quien define hoy cómo se habla con la red telco desde MCP, define las reglas del mercado.
-- **El mercado de agentes empresariales** está pasando de decenas de miles a millones en los próximos 12-24 meses. Cada agente serio necesitará identidad móvil real, no un wrapper de Twilio.
+- **El mercado de agentes empresariales** está pasando de decenas de miles a millones en los próximos 12-24 meses. Cada agente serio necesitará identidad móvil real, no un wrapper de APIs ajenas.
 - **Tener el stack propio desde el día uno** es la diferencia entre un negocio de margen 10% (revender API ajena) y un negocio de margen 60-80% (controlar la pila).
 - **El socio técnico que aporta la capa de plataforma** ya tiene experiencia, código y operativa probados. No es un proyecto a construir desde cero — es un proyecto a integrar con el protocolo que ya está vivo.
 
@@ -267,9 +269,9 @@ Para **agentes AI con número de teléfono real**, este modelo no lo tiene nadie
 
 Para evitar malentendidos:
 
-- **No somos un wrapper de Twilio.** Twilio, Vonage, MessageBird son nuestros competidores indirectos, no nuestros proveedores.
-- **No somos un revendedor de un operador.** Telefónica, Vodafone y Orange operan a humanos; nosotros operamos a agentes con nuestra propia infraestructura.
-- **No dependemos del roadmap de nadie.** Si mañana Anthropic, Twilio o un operador retira una API, nuestro stack sigue operativo.
+- **No somos un wrapper de APIs ajenas.** Los CPaaS y los SDK de comunicaciones de terceros son competidores indirectos, no proveedores nuestros.
+- **No somos un revendedor de un operador.** Los operadores tradicionales operan a humanos; nosotros operamos a agentes con nuestra propia infraestructura.
+- **No dependemos del roadmap de nadie.** Si mañana cambia o desaparece cualquier API externa, nuestro stack sigue operativo.
 - **No buscamos integrarnos con un operador** que decida nuestra estrategia. Nuestro stack es vertical y completo desde el día uno.
 
 ---
