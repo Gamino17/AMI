@@ -3054,8 +3054,68 @@ def render_experience_page():
   }}
 
   @media (max-width: 600px) {{
-    section.exp {{ padding: 5rem 0; }}
+    section.exp {{ padding: 3.5rem 0; }}
     .exp-nav a:not(.cta) {{ display: none; }}
+
+    /* HERO en móvil: hueco superior menor, título un punto menos agresivo */
+    .exp-hero {{ padding: 5rem 1rem 2.5rem; }}
+    h1.hero-title {{ letter-spacing: -0.035em; }}
+    .hero-pill {{ font-size: 0.66rem; padding: 0.3rem 0.7rem; }}
+    .hero-sub {{ font-size: 1rem; }}
+    .terminal-body {{ font-size: 0.72rem; padding: 1rem 1.1rem; line-height: 1.55; }}
+    .terminal-bar .title {{ font-size: 0.66rem; }}
+
+    /* El número: bajar font-size para evitar overflow horizontal con 14 chars */
+    .number-display {{
+      font-size: clamp(1.5rem, 7.5vw, 7.5rem);
+      gap: 0.12em;
+    }}
+    .number-status {{ font-size: 0.74rem; padding: 0.4rem 0.85rem; }}
+    .number-caption {{ font-size: 0.95rem; }}
+
+    /* Network canvas más bajo y leyenda compacta */
+    .net-canvas-wrap {{ height: 380px; }}
+    .net-legend {{ font-size: 0.68rem; gap: 0.7rem 1rem; flex-wrap: wrap; justify-content: center; }}
+
+    /* Flow steps más densos, código un punto menor */
+    .flow-step {{ padding: 1.5rem 1.25rem; gap: 1.2rem; }}
+    .flow-step h3 {{ font-size: 1.25rem; }}
+    .flow-step p {{ font-size: 0.92rem; }}
+    .flow-code {{ font-size: 0.72rem; padding: 1rem 1.1rem; line-height: 1.6; }}
+    .flow-step-num {{ font-size: 0.66rem; }}
+
+    /* Tools grid: una sola columna */
+    .tools-grid-2 {{ grid-template-columns: 1fr; }}
+    .tool-cell {{ padding: 1rem 1.2rem; }}
+    .tool-cell .name {{ font-size: 0.82rem; }}
+    .tool-cell .desc {{ font-size: 0.83rem; }}
+
+    /* Stack layers más compactos */
+    .stack-layer {{
+      grid-template-columns: 3rem 1fr;
+      gap: 1rem; padding: 1.25rem 1.3rem;
+    }}
+    .stack-num {{ font-size: 1.3rem; }}
+    .stack-name {{ font-size: 0.98rem; gap: 0.45rem; }}
+    .stack-tag {{ font-size: 0.6rem; padding: 0.12rem 0.45rem; }}
+    .stack-components {{ font-size: 0.78rem; line-height: 1.6; }}
+    .stack-footnote {{ font-size: 0.85rem; padding: 0.85rem 1.1rem; }}
+
+    /* Endpoint list: dos líneas en móvil ya estaba; refinar */
+    .endpoint-list li {{ padding: 0.7rem 1.1rem; }}
+
+    /* Live demo: terminal más pequeño */
+    .demo-body {{ padding: 1.5rem 1.2rem; font-size: 0.78rem; }}
+    .demo-cta-wrap {{ padding: 2.5rem 1rem; }}
+    .demo-result-phone {{ font-size: clamp(1.4rem, 6vw, 2.4rem); }}
+
+    /* CTA final más compacto */
+    .exp-cta {{ padding: 4rem 0; }}
+    .exp-cta h2 {{ font-size: clamp(1.7rem, 7vw, 4rem); }}
+    .exp-cta p {{ font-size: 1rem; }}
+
+    /* Botones full-width-ish para ser pulsables */
+    .hero-ctas .btn {{ font-size: 0.9rem; padding: 0.75rem 1.2rem; }}
   }}
 
   /* SECCIÓN: CINEMA · stack respirando ============================== */
@@ -3239,13 +3299,61 @@ def render_experience_page():
     letter-spacing: 0.04em;
   }}
   @media (max-width: 720px) {{
-    .cinema-stage {{ height: 420px; }}
-    .cinema-actor {{ width: 90px; }}
-    .cinema-actor.agent {{ left: 15%; }}
-    .cinema-actor.world {{ left: 85%; }}
-    .cinema-stack {{ min-width: 130px; }}
-    .cinema-module {{ font-size: 0.66rem; padding: 0.35rem 0.55rem; }}
-    .cinema-bubble {{ font-size: 0.66rem; max-width: 200px; }}
+    /* Cinema en móvil: layout VERTICAL · agente arriba, stack centro, mundo abajo */
+    .cinema-stage {{ height: 620px; }}
+    .cinema-actor {{ width: 110px; }}
+    .cinema-actor.agent {{ left: 50%; top: 13%; }}
+    .cinema-actor.world {{ left: 50%; top: 87%; }}
+    .cinema-actor-icon {{ width: 50px; height: 50px; font-size: 1.2rem; }}
+    .cinema-actor-name {{ font-size: 0.74rem; }}
+    .cinema-actor-meta {{ font-size: 0.68rem; }}
+
+    /* Stack horizontal centrado, módulos en wrap */
+    .cinema-stack {{
+      flex-direction: row;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.35rem;
+      min-width: 0;
+      max-width: calc(100% - 2rem);
+    }}
+    .cinema-stack-title {{ width: 100%; margin-bottom: 0.5rem; }}
+    .cinema-module {{
+      font-size: 0.62rem;
+      padding: 0.3rem 0.55rem;
+      flex: 0 0 auto;
+    }}
+
+    /* Burbujas: más pequeñas, con wrap */
+    .cinema-bubble {{
+      font-size: 0.65rem;
+      max-width: 180px;
+      white-space: normal;
+      text-align: center;
+      line-height: 1.4;
+      padding: 0.4rem 0.7rem;
+    }}
+    /* Burbuja del agente: aparece DEBAJO del actor (no encima) para no
+       salirse de la stage y para no chocar con el wrap superior */
+    .cinema-actor.agent .cinema-bubble {{
+      bottom: auto;
+      top: 100%;
+      margin-bottom: 0;
+      margin-top: 0.6rem;
+    }}
+    .cinema-actor.agent .cinema-bubble::after {{
+      top: auto;
+      bottom: 100%;
+      border-top-color: transparent;
+      border-bottom-color: var(--surface);
+    }}
+
+    /* Status y replay más pequeños */
+    .cinema-status {{ font-size: 0.78rem; padding: 0 1rem; }}
+    .cinema-status .act {{ font-size: 0.64rem; padding: 0.1rem 0.45rem; margin-right: 0.5rem; }}
+    .cinema-replay-btn {{ font-size: 0.72rem; padding: 0.45rem 1rem; }}
+    .cinema-finale h3 {{ font-size: clamp(1.3rem, 6vw, 2.6rem); }}
+    .cinema-finale p {{ font-size: 0.72rem; padding: 0 1rem; }}
   }}
 </style>
 </head>
@@ -3702,19 +3810,40 @@ def render_experience_page():
 
     function buildNodes() {{
       nodes = [];
-      // Agentes (izquierda, distribuidos verticalmente)
-      const leftX = W * 0.14;
-      agentLabels.forEach((label, i) => {{
-        const y = H * (0.18 + i * 0.13);
-        nodes.push({{ kind: 'agent', x: leftX, y, label, color: '#5dd1ff', r: 6 }});
+      // En móvil reducimos a 4 agentes y 3 plataformas + acercamos al centro
+      // para que los labels no se salgan del canvas y se vea más limpio.
+      const isMobile = W < 600;
+      const agents = isMobile
+        ? ['Claude', 'OpenAI', 'OpenClaw', 'Custom']
+        : agentLabels;
+      const platforms = isMobile
+        ? ['Asterisk', 'Kannel', 'Numbers']
+        : platformLabels;
+
+      // Agentes (izquierda)
+      const leftX = isMobile ? W * 0.22 : W * 0.14;
+      agents.forEach((label, i) => {{
+        const spread = isMobile ? 0.18 : 0.13;
+        const start  = isMobile ? 0.22 : 0.18;
+        const y = H * (start + i * spread);
+        nodes.push({{ kind: 'agent', x: leftX, y, label, color: '#5dd1ff', r: isMobile ? 5 : 6 }});
       }});
-      // AMI central (nuestro core de protocolo + backend)
-      nodes.push({{ kind: 'ami', x: W * 0.5, y: H * 0.5, label: 'AMI', color: '#8b6cff', r: 18 }});
-      // Plataforma propia (capa 3): mismo color violeta que AMI porque ES AMI
-      const platX = W * 0.82;
-      platformLabels.forEach((label, i) => {{
-        const y = H * (0.22 + i * 0.18);
-        nodes.push({{ kind: 'platform', x: platX, y, label, color: '#a78bff', r: 8 }});
+      // AMI central
+      nodes.push({{
+        kind: 'ami',
+        x: isMobile ? W * 0.5 : W * 0.5,
+        y: H * 0.5,
+        label: 'AMI',
+        color: '#8b6cff',
+        r: isMobile ? 14 : 18
+      }});
+      // Plataforma propia
+      const platX = isMobile ? W * 0.78 : W * 0.82;
+      platforms.forEach((label, i) => {{
+        const spread = isMobile ? 0.22 : 0.18;
+        const start  = isMobile ? 0.28 : 0.22;
+        const y = H * (start + i * spread);
+        nodes.push({{ kind: 'platform', x: platX, y, label, color: '#a78bff', r: isMobile ? 6 : 8 }});
       }});
     }}
     buildNodes();
@@ -3843,18 +3972,22 @@ def render_experience_page():
         ctx.strokeStyle = n.kind === 'ami' ? '#fff' : n.color;
         ctx.lineWidth = n.kind === 'ami' ? 2 : 1;
         ctx.stroke();
-        // Label
+        // Label · en móvil reducimos font y offset para no salirse
+        const mob = W < 600;
         ctx.fillStyle = '#ededf2';
-        ctx.font = (n.kind === 'ami' ? '600 13px ' : '500 11px ') + 'JetBrains Mono, monospace';
+        const sizeAmi   = mob ? 11 : 13;
+        const sizeOther = mob ? 9 : 11;
+        ctx.font = (n.kind === 'ami' ? '600 ' + sizeAmi + 'px ' : '500 ' + sizeOther + 'px ') + 'JetBrains Mono, monospace';
+        const off = mob ? 5 : 8;
         if (n.kind === 'agent') {{
           ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-          ctx.fillText(n.label, n.x - n.r - 8, n.y);
+          ctx.fillText(n.label, n.x - n.r - off, n.y);
         }} else if (n.kind === 'ami') {{
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-          ctx.fillText(n.label, n.x, n.y + n.r + 22);
+          ctx.fillText(n.label, n.x, n.y + n.r + (mob ? 16 : 22));
         }} else if (n.kind === 'platform') {{
           ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-          ctx.fillText(n.label, n.x + n.r + 8, n.y);
+          ctx.fillText(n.label, n.x + n.r + off, n.y);
         }}
       }});
     }}
