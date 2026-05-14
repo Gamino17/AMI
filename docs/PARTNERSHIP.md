@@ -191,6 +191,69 @@ No estamos describiendo un proyecto futuro. Hay piezas en producción y piezas e
 
 ---
 
+## Canal de distribución · bundles con hosting providers
+
+Hay una oportunidad masiva y poco evidente: los proveedores de hosting (Hostinger, Vercel, Railway, Render, Cloudflare, Fly.io, …) ya están vendiendo **agentes AI desplegados como servicio**. Hostinger anuncia hoy más de **100.000 agentes OpenClaw desplegados** en sus planes. Replit, Vercel y Railway están detrás con jugadas equivalentes.
+
+Estos agentes nacen con todo lo que necesitan para operar en cloud — **excepto un número de teléfono propio**. Ningún hosting provider tiene infraestructura telco. Es el hueco perfecto para AMI.
+
+### La propuesta de canal
+
+Ofrecer a cada hosting provider un bundle integrado: el cliente final paga, por ejemplo, **+1 €/mes** sobre su plan y recibe automáticamente:
+
+- Un número AMI provisionado en su país.
+- API ya cableada en el agente desde el primer arranque (config inyectada vía variables de entorno del provider).
+- SMS y voz operativos desde el día uno.
+- Compliance, contrato y audit log gestionados por AMI.
+
+Reparto típico negociable: **60% AMI / 40% provider**. AMI cubre numeración, infraestructura y operación. El provider cubre integración, soporte de primer nivel y visibilidad de marca.
+
+### Cómo se ve la integración
+
+```mermaid
+flowchart LR
+  classDef provider fill:#1a1a24,stroke:#fbbf24,color:#ededf2,stroke-width:1px
+  classDef customer fill:#1a1a24,stroke:#4ade80,color:#ededf2,stroke-width:1px
+  classDef parallax fill:#1a1a24,stroke:#8b6cff,color:#ededf2,stroke-width:2px
+
+  C["Cliente final<br/>(compra plan con agente)"]:::customer
+  H["Hosting provider<br/>(Hostinger · Vercel · Railway · …)"]:::provider
+  AMI["AMI Stack<br/>(número + API + compliance)"]:::parallax
+
+  C -->|plan + 1 €/mes bundle| H
+  H -->|API: provision_number_for_customer| AMI
+  AMI -->|MSISDN + credenciales| H
+  H -->|inyecta en env del agente| C
+  AMI -.revenue share.-> H
+```
+
+**El cliente final no firma con AMI** — es el provider quien tiene la relación contractual. Para el cliente, el número aparece "incluido en el plan". Para nosotros, cada agente aprovisionado por un partner es un MSISDN bajo nuestra plataforma generando ingreso recurrente.
+
+### Por qué esto es asimétrico a nuestro favor
+
+- **Distribución gratuita a escala masiva.** Si Hostinger lo activa por defecto, son ~100K nuevos clientes anuales con identidad AMI sin nuestro coste de marketing.
+- **Adquisición casi-cero.** El cliente ya pagó por su agente; +1 €/mes por un número operativo real es marginal frente al resto del plan.
+- **Lock-in suave.** Una vez el agente tiene su número con compliance y audit log, migrarlo es trabajo. Quien arranque con AMI se queda con AMI.
+- **Multi-provider desde el día uno.** No es exclusivo con nadie; lo ofrecemos a cada hosting que monetiza agentes. Cada bundle es independiente.
+- **Negocio recurrente, no proyecto.** No vendemos "una integración" — vendemos un canal vivo con margen mensual.
+
+### Quién tiene este modelo hoy
+
+- **Stripe + Shopify** — el ejemplo paradigmático: cada tienda Shopify viene Stripe-ready, Stripe captura todo el comercio.
+- **Twilio + Shopify Plus** — comunicaciones "transparentes" para el merchant.
+- **Cloudflare + Vercel** — bundles cross-vendor por defecto.
+
+Para **agentes AI con número de teléfono real**, este modelo no lo tiene nadie todavía. La ventana se cierra cuando alguien (probablemente Twilio o Vonage) lo cierre primero con uno de los hosting players grandes. Hablar ahora con Hostinger, Vercel y Railway es la jugada.
+
+### Cómo arrancar
+
+1. Identificar el primer provider piloto. Hostinger es el candidato natural dado el volumen visible (100K+ agentes anunciados) y que su producto **OpenClaw managed** ya tiene cliente final cautivo esperando funcionalidades.
+2. API simple expuesta por AMI: `POST /v1/partners/{partner_id}/provision` que toma `customer_ref` + `country` y devuelve `phone_number` + `credentials`. Una sola llamada. Documentación y ejemplo de integración listos en una semana.
+3. Bundle de marca opcional: "Powered by AMI" en el dashboard del partner, o invisible si prefieren branding propio.
+4. Pricing: comisión revenue share sobre el bundle, sin cuotas mínimas iniciales para reducir fricción del partner. Ajustable cuando el volumen lo justifique.
+
+---
+
 ## Por qué este momento
 
 - **MCP se está convirtiendo en el estándar** de cómo los agentes hablan con servicios externos. Quien define hoy cómo se habla con la red telco desde MCP, define las reglas del mercado.

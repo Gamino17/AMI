@@ -2914,6 +2914,112 @@ def render_experience_page():
   }}
   .stack-footnote strong {{ color: var(--ink); }}
 
+  /* SECCIÓN: BUNDLE · canal de distribución =========================== */
+  .exp-bundle {{ padding: 4rem 0; background: var(--bg); }}
+  .exp-bundle .wrap {{ text-align: center; max-width: 1180px; }}
+  .bundle-flow {{
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    gap: 1rem; align-items: stretch;
+    max-width: 1080px; margin: 3rem auto 0;
+  }}
+  .bundle-card {{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 1.6rem 1.4rem;
+    text-align: center;
+    transition: border-color 0.25s, transform 0.25s;
+    display: flex; flex-direction: column; justify-content: center;
+    min-height: 170px;
+  }}
+  .bundle-card:hover {{ border-color: var(--accent); transform: translateY(-2px); }}
+  .bundle-card.amber {{ border-color: rgba(251,191,36,0.3); }}
+  .bundle-card.amber:hover {{ border-color: var(--amber); }}
+  .bundle-card.violet {{ border-color: rgba(139,108,255,0.4); }}
+  .bundle-card.violet:hover {{ border-color: var(--accent); }}
+  .bundle-card.green {{ border-color: rgba(74,222,128,0.3); }}
+  .bundle-card.green:hover {{ border-color: var(--green); }}
+  .bundle-tag {{
+    font-family: var(--mono); font-size: 0.65rem;
+    color: var(--ink-mute);
+    text-transform: uppercase; letter-spacing: 0.14em;
+    margin-bottom: 0.85rem; font-weight: 600;
+  }}
+  .bundle-providers {{
+    display: flex; flex-wrap: wrap; gap: 0.4rem;
+    justify-content: center; margin-bottom: 0.7rem;
+  }}
+  .bundle-providers span {{
+    font-family: var(--mono); font-size: 0.78rem;
+    background: rgba(251,191,36,0.08);
+    border: 1px solid rgba(251,191,36,0.25);
+    color: var(--amber);
+    padding: 0.2rem 0.55rem; border-radius: 4px;
+  }}
+  .bundle-price {{
+    font-family: var(--mono); font-weight: 700;
+    font-size: clamp(2rem, 4vw, 2.8rem);
+    color: var(--accent); line-height: 1;
+    letter-spacing: -0.02em;
+    background: linear-gradient(135deg, #8b6cff, #5dd1ff);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }}
+  .bundle-price span {{
+    font-size: 0.9rem; color: var(--ink-soft);
+    -webkit-text-fill-color: var(--ink-soft);
+    font-weight: 500; margin-left: 0.1rem;
+  }}
+  .bundle-result {{
+    font-family: var(--mono); font-weight: 600;
+    font-size: clamp(1rem, 2.2vw, 1.4rem);
+    color: var(--green);
+    letter-spacing: -0.01em;
+  }}
+  .bundle-meta {{
+    font-family: var(--sans); font-size: 0.82rem;
+    color: var(--ink-soft); margin-top: 0.6rem; line-height: 1.4;
+  }}
+  .bundle-arrow {{
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink-mute); font-size: 1.6rem;
+    font-family: var(--mono);
+  }}
+  .bundle-stats {{
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem;
+    max-width: 1080px; margin: 2.5rem auto 0;
+  }}
+  .bundle-stat {{
+    background: var(--bg-soft);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1.3rem 1.2rem;
+    text-align: center;
+  }}
+  .bundle-stat-num {{
+    font-family: var(--mono); font-weight: 700;
+    font-size: clamp(1.7rem, 3.8vw, 2.4rem);
+    color: var(--ink); letter-spacing: -0.02em; line-height: 1;
+    margin-bottom: 0.55rem;
+  }}
+  .bundle-stat-num .accent-grad {{
+    background: linear-gradient(135deg, #8b6cff, #5dd1ff);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }}
+  .bundle-stat-label {{
+    font-size: 0.85rem; color: var(--ink-soft); line-height: 1.45;
+  }}
+  @media (max-width: 880px) {{
+    .bundle-flow {{
+      grid-template-columns: 1fr;
+      gap: 0.5rem; max-width: 480px;
+    }}
+    .bundle-arrow {{ transform: rotate(90deg); padding: 0.3rem 0; }}
+    .bundle-stats {{ grid-template-columns: 1fr; }}
+  }}
+
   /* SECCIÓN: LIVE DEMO ============================================= */
   .exp-demo {{
     padding: 4rem 0 5rem;
@@ -3367,6 +3473,7 @@ def render_experience_page():
       <nav class="exp-nav">
         <a href="#flow">Flujo</a>
         <a href="#stack">Stack</a>
+        <a href="#bundle">Bundle</a>
         <a href="/spec">Spec</a>
         <a href="{html_escape(REPO_URL)}">GitHub</a>
         <a href="#demo" class="cta">Pruébalo</a>
@@ -3594,6 +3701,60 @@ def render_experience_page():
         experiencia operativa probada. El peering al PSTN se resuelve como interconnect estándar,
         igual que cualquier operador del mundo.
       </p>
+    </div>
+  </section>
+
+  <!-- BUNDLE · canal de distribución ================================ -->
+  <section class="exp exp-bundle" id="bundle">
+    <div class="wrap">
+      <div class="eyebrow reveal">canal de distribución</div>
+      <h2 class="section-title reveal">Incluido en tu <span class="grad">hosting</span>, por defecto.</h2>
+      <p class="section-sub reveal" style="margin: 0 auto;">
+        Cada vez más providers despliegan agentes AI como producto. AMI se integra como
+        <strong>bundle</strong> en su plan: el cliente paga +1 € al mes y recibe número,
+        API cableada y compliance desde el primer arranque. Cero configuración.
+      </p>
+
+      <div class="bundle-flow reveal-stagger">
+        <div class="bundle-card amber">
+          <div class="bundle-tag">providers</div>
+          <div class="bundle-providers">
+            <span>Hostinger</span>
+            <span>Vercel</span>
+            <span>Replit</span>
+            <span>Railway</span>
+            <span>…</span>
+          </div>
+          <div class="bundle-meta">despliegan agentes AI en sus planes</div>
+        </div>
+        <div class="bundle-arrow">→</div>
+        <div class="bundle-card violet">
+          <div class="bundle-tag">bundle ami</div>
+          <div class="bundle-price">+1 €<span>/mes</span></div>
+          <div class="bundle-meta">por agente desplegado, dentro del plan del provider</div>
+        </div>
+        <div class="bundle-arrow">→</div>
+        <div class="bundle-card green">
+          <div class="bundle-tag">agente final</div>
+          <div class="bundle-result">+34 600 ███ ███</div>
+          <div class="bundle-meta">número operativo de fábrica, sin tocar nada</div>
+        </div>
+      </div>
+
+      <div class="bundle-stats reveal-stagger">
+        <div class="bundle-stat">
+          <div class="bundle-stat-num"><span class="accent-grad">100k+</span></div>
+          <div class="bundle-stat-label">agentes desplegados solo en Hostinger, hoy. Cada uno sin número.</div>
+        </div>
+        <div class="bundle-stat">
+          <div class="bundle-stat-num">0 €</div>
+          <div class="bundle-stat-label">coste de adquisición · el provider trae al cliente</div>
+        </div>
+        <div class="bundle-stat">
+          <div class="bundle-stat-num">60 / 40</div>
+          <div class="bundle-stat-label">reparto típico AMI · provider, negociable por volumen</div>
+        </div>
+      </div>
     </div>
   </section>
 
