@@ -153,6 +153,8 @@ AMI expone tres interfaces:
 
 ### 3.1 Métodos de contratación (v1)
 
+Auth: `AMI_API_KEY` del customer (Nivel 1).
+
 - `ami.search_sim_options`
 - `ami.request_sim_offer`
 - `ami.accept_offer`
@@ -160,22 +162,74 @@ AMI expone tres interfaces:
 - `ami.create_contract`
 - `ami.get_contract_status`
 - `ami.confirm_signature_status`
-- `ami.activate_sim_identity`
+- `ami.activate_sim_identity` — devuelve el `agent_token` scoped al MID, **una sola vez**
 - `ami.get_identity_status`
 - `ami.cancel_request`
+- `ami.rotate_agent_token` — hard rotate: invalida el token anterior al instante
 
-### 3.2 Métodos de operación (v2 — fuera de v1)
+### 3.2 Métodos de operación (Operations v2)
 
-- `ami.send_sms`, `ami.send_whatsapp`
-- `ami.start_call`, `ami.receive_call`, `ami.transfer_to_human`
-- `ami.get_call_transcript`, `ami.get_message_status`
+Auth: `agent_token` scoped al MID (Nivel 2).
+
+**SMS:**
+- `ami.send_sms(to, body)` — encola; transición `queued → sent → delivered`
+- `ami.list_sms(limit, direction)` — historial scoped al MID
+
+**Voz (bridge-by-API):**
+- `ami.place_call(to, callback_sip_uri)` — origina la llamada al PSTN y la
+  bridgea por SIP al endpoint del cliente (típicamente
+  `sip:<project>@sip.api.openai.com;transport=tls`). AMI cursa la pipa; el
+  "cerebro" de la voz vive en el endpoint del cliente.
+- `ami.list_calls(limit, direction)`, `ami.get_call(call_id)`
+- `ami.hangup_call(call_id)`
+- `ami.set_inbound_sip_uri(mid, sip_uri)` — auth Nivel 1; configura a dónde
+  reenviar las llamadas entrantes del MID (típicamente el mismo endpoint
+  Realtime del cliente). Sin esto configurado, las entrantes se rechazan.
+
+**Audit:**
 - `ami.list_events`
 
-### 3.3 Métodos de gobierno (v2 — fuera de v1)
+### 3.3 Métodos de gobierno (v2 — pendientes)
 
 - `ami.set_limits`, `ami.get_usage`
 - `ami.suspend_identity`, `ami.release_number`
-- `ami.rotate_credentials`, `ami.audit_log`
+- `ami.audit_log`
+
+### 3.4 Modelo de voz: AMI = operador, NO Realtime
+
+Tres piezas distintas en una llamada de agente:
+
+1. **Operador / SIP provider** — pieza que AMI ocupa. Compra/asigna números,
+   cursa llamadas al PSTN, ofrece SIP-out al endpoint del cliente.
+2. **Backend del cliente / agente** — decide si acepta la llamada, con qué
+   prompt, qué tools tiene, logs, permisos, límites.
+3. **Motor de voz Realtime** — recibe/manda audio en vivo y ejecuta el agente
+   de voz con baja latencia.
+
+AMI ocupa **únicamente la pieza 1**. Las piezas 2 y 3 son del cliente. Esto
+mantiene la analogía con cualquier operador clásico: el operador no graba ni
+transcribe la llamada, solo te la cursa. El coste de Realtime corre en la
+cuenta del cliente; AMI factura por número + minutos cursados.
+
+Patrón saliente típico:
+
+```
+agente → tool.phone.call → backend.cliente
+                            ↓ POST /v1/agent/calls/place {to, callback_sip_uri}
+                          AMI (operador)
+                            ↓ marca al PSTN
+                            ↓ bridgea SIP al callback_sip_uri
+                          endpoint del cliente (Realtime / PBX)
+```
+
+Patrón entrante:
+
+```
+red telco → AMI (recibe la llamada)
+              ↓ resuelve inbound_sip_uri del MID
+              ↓ SIP-forward
+            endpoint del cliente
+```
 
 ---
 

@@ -1341,6 +1341,7 @@ FAVICON_SVG_DATA_URI = (
 
 def _tools_for_landing():
     return [
+        # --- Contratación y aprovisionamiento (v1) ---
         ("ami.search_sim_options",      "Lista países y capacidades de numeración disponibles (voz · SMS · datos)."),
         ("ami.request_sim_offer",       "Crea una solicitud de número y devuelve la oferta inmediata desde nuestra plataforma."),
         ("ami.accept_offer",            "Acepta una oferta antes de generar contrato."),
@@ -1351,12 +1352,24 @@ def _tools_for_landing():
         ("ami.activate_sim_identity",   "Activa el número en nuestra plataforma tras la firma del contrato."),
         ("ami.get_identity_status",     "Consulta el estado de una MobileIdentity activa."),
         ("ami.cancel_request",          "Cancela la solicitud antes de la activación del número."),
+        ("ami.rotate_agent_token",      "Rota el agent_token de una MobileIdentity (hard rotate, invalida el anterior)."),
+        # --- Operations v2 · SMS ---
+        ("ami.send_sms",                "Envía un SMS desde la MobileIdentity activa (auth: agent_token Nivel 2)."),
+        ("ami.list_sms",                "Lista los SMS de la MobileIdentity (filtrable por dirección)."),
+        # --- Operations v2 · Voz (bridge-by-API) ---
+        ("ami.place_call",              "Origina una llamada saliente y la bridgea por SIP al endpoint del cliente (Realtime de OpenAI o PBX propio)."),
+        ("ami.list_calls",              "Lista las llamadas del MID (filtrable por dirección)."),
+        ("ami.get_call",                "Detalle de una llamada (scoped al MID)."),
+        ("ami.hangup_call",             "Termina una llamada en curso del MID."),
+        ("ami.set_inbound_sip_uri",     "Configura el endpoint SIP al que reenviar las llamadas entrantes del MID."),
+        # --- Audit ---
         ("ami.list_events",             "Devuelve los últimos AuditEvents (debug e inspección)."),
     ]
 
 
 def _endpoints_for_landing():
     return [
+        # --- Contratación y aprovisionamiento (v1) ---
         ("GET",  "/v1/health",                              "Healthcheck (público)."),
         ("GET",  "/v1/sim-options",                         "Países y SIMs disponibles."),
         ("POST", "/v1/sim-requests",                        "Crea SIMRequest y oferta."),
@@ -1369,10 +1382,22 @@ def _endpoints_for_landing():
         ("POST", "/v1/sign/{id}/confirm",                   "Callback del form de firma (público)."),
         ("POST", "/v1/mobile-identities/activate",          "Activa la MobileIdentity tras la firma."),
         ("GET",  "/v1/mobile-identities/{id}",              "Consulta una MobileIdentity."),
+        ("POST", "/v1/mobile-identities/{id}/rotate-token", "Rota el agent_token (hard rotate)."),
+        ("POST", "/v1/mobile-identities/{id}/inbound-config","Setea el endpoint SIP para llamadas entrantes."),
+        # --- Operations v2 · scoped por agent_token (Nivel 2) ---
+        ("GET",  "/v1/agent/self",                          "Info de la MobileIdentity dueña del agent_token."),
+        ("POST", "/v1/agent/sms/send",                      "Envía un SMS desde el MID (auth: agent_token)."),
+        ("GET",  "/v1/agent/sms",                           "Lista los SMS del MID (filtrable por dirección)."),
+        ("POST", "/v1/agent/calls/place",                   "Origina una llamada saliente bridgeada por SIP."),
+        ("GET",  "/v1/agent/calls",                         "Lista las llamadas del MID."),
+        ("GET",  "/v1/agent/calls/{id}",                    "Detalle de una llamada del MID."),
+        ("POST", "/v1/agent/calls/{id}/hangup",             "Termina una llamada del MID."),
+        # --- Audit y demo ---
         ("GET",  "/v1/events",                              "Últimos AuditEvents."),
         ("POST", "/v1/demo/quick",                          "Flujo end-to-end completo en una llamada (público, sin auth)."),
         ("GET",  "/identity/{id}",                          "Página pública de una MobileIdentity activa."),
         ("GET",  "/spec",                                   "Spec del protocolo renderizada en HTML."),
+        ("GET",  "/diagram",                                "Animación standalone del ciclo de vida del stack."),
     ]
 
 
@@ -5684,13 +5709,26 @@ def render_llms_txt():
     endpoint_lines = "\n".join(f"- {v} {p} — {d}" for v, p, d in _endpoints_for_landing())
     return f"""# AMI — Agent Mobile Identity Protocol
 
-> Protocolo estándar para que un agente AI solicite, contrate y active una identidad móvil
-> (SIM, eSIM o número de teléfono). v1 cubre el flujo de contratación y aprovisionamiento;
-> la operación (llamadas, SMS, WhatsApp) llega en v2.
+> Protocolo estándar para que un agente AI obtenga y opere una identidad móvil
+> (número, SMS y voz) con todo el ciclo de vida sobre nuestro propio stack. v1
+> cubre **contratación + aprovisionamiento** del número, y **Operations v2**
+> añade SMS y voz scoped por agente.
 
-AMI expone un MCP server con 11 tools y una REST API JSON. El agente recorre:
-solicitud → oferta → datos cliente → contrato → firma → MobileIdentity activa.
-Lo único simulado actualmente es la SIM física; el resto del flujo es real.
+AMI expone un MCP server y una REST API JSON. El agente recorre dos planos:
+
+1. **Contratación (una vez por número):** solicitud → oferta → datos cliente →
+   contrato → firma → MobileIdentity activa. Al activar, AMI devuelve un
+   `agent_token` scoped al MID (Nivel 2 de auth) que se usa después.
+2. **Operación (continuo):** con el `agent_token`, el agente envía/recibe SMS
+   y origina/recibe llamadas. La voz funciona en **bridge-by-API**: AMI cursa
+   la llamada al PSTN y la bridgea por SIP al endpoint del cliente
+   (típicamente su URI Realtime, p.ej. `sip:<proj>@sip.api.openai.com`). AMI
+   NO ejecuta voz — es el operador / SIP provider, no el cerebro.
+
+Lo único simulado en v1 es la pieza telco (SIM/SMSC/PBX). El resto —
+contratos, firma, máquina de estados, audit, scoped tokens, lifecycle de SMS
+y llamadas — es real y sustituible por adaptadores hacia el partner telco
+sin cambiar el contrato externo.
 
 ## Conexión (recomendado para agentes)
 
@@ -5713,10 +5751,22 @@ Sólo si el cliente MCP no soporta HTTP remoto:
 - Repo: {REPO_URL}
 - Requiere setear `AMI_API_KEY` propia para hablar con el backend.
 
+## Auth (dos niveles)
+
+- **Nivel 1 — `AMI_API_KEY`** (header `Authorization: Bearer ...`). Es la
+  credencial del *customer*. Cubre todo el plano de contratación
+  (`/v1/sim-requests`, `/v1/contracts`, `/v1/mobile-identities/activate`,
+  `/v1/mobile-identities/{{id}}/rotate-token`, etc.).
+- **Nivel 2 — `agent_token`** (`amiagt_live_<hex>`, también header `Bearer`).
+  Es scoped a una sola MobileIdentity. Devuelto una sola vez al activar el
+  número. Cubre el plano de operación (`/v1/agent/sms/*`, `/v1/agent/calls/*`,
+  `/v1/agent/self`). Si se filtra, rotarlo con
+  `POST /v1/mobile-identities/{{id}}/rotate-token` lo invalida al instante.
+
 ## Acceso REST directo
 
 Para clientes no-MCP, la API REST está documentada en /openapi.json. Auth con
-header `Authorization: Bearer <AMI_API_KEY>`.
+los esquemas descritos arriba.
 
 ## Tools MCP (namespace ami.*)
 
@@ -5750,32 +5800,70 @@ def render_openapi():
         "servers": [{"url": "https://protocolami.com", "description": "Mock público"}],
         "components": {
             "securitySchemes": {
-                "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "AMI_API_KEY"}
+                "bearerAuth": {
+                    "type": "http", "scheme": "bearer", "bearerFormat": "AMI_API_KEY",
+                    "description": "Nivel 1: API key del customer. Usa este esquema para todos los endpoints de contratación.",
+                },
+                "agentBearer": {
+                    "type": "http", "scheme": "bearer", "bearerFormat": "amiagt_live_<hex>",
+                    "description": "Nivel 2: agent_token scoped a una MobileIdentity. Devuelto una sola vez al activar. Lo usan los endpoints /v1/agent/*.",
+                },
+                "telcoKey": {
+                    "type": "apiKey", "in": "header", "name": "X-Telco-Key",
+                    "description": "Clave compartida con el partner telco para los webhooks /v1/_telco/*. Configurada por AMI_TELCO_INBOUND_KEY.",
+                },
             }
         },
         "security": [{"bearerAuth": []}],
+        "tags": [
+            {"name": "Contratación", "description": "Solicitud, oferta, datos del cliente, contrato, firma y activación."},
+            {"name": "Operations v2 · SMS", "description": "Envío y listado de SMS scoped por agent_token."},
+            {"name": "Operations v2 · Voz", "description": "Llamadas bridge-by-API: AMI cursa la pipa SIP, el cliente ejecuta la voz."},
+            {"name": "Webhooks telco", "description": "Endpoints internos llamados por el partner telco (autenticados con X-Telco-Key)."},
+            {"name": "Discovery", "description": "Salud, audit, demo, páginas públicas."},
+        ],
         "paths": {
-            "/v1/health":                                 {"get":  {"summary": "Healthcheck", "security": [], "responses": {"200": {"description": "OK"}}}},
-            "/v1/sim-options":                            {"get":  {"summary": "Países y SIMs disponibles", "responses": {"200": {"description": "OK"}}}},
-            "/v1/sim-requests":                           {"post": {"summary": "Crear SIMRequest + oferta", "responses": {"201": {"description": "Created"}}}},
-            "/v1/sim-requests/{id}":                      {"get":  {"summary": "Obtener SIMRequest", "responses": {"200": {"description": "OK"}}}},
-            "/v1/sim-requests/{id}/cancel":               {"post": {"summary": "Cancelar SIMRequest", "responses": {"200": {"description": "OK"}}}},
-            "/v1/sim-requests/{id}/customer-data":        {"post": {"summary": "Adjuntar datos del cliente", "responses": {"201": {"description": "Created"}}}},
-            "/v1/offers/{id}":                            {"get":  {"summary": "Obtener oferta", "responses": {"200": {"description": "OK"}}}},
-            "/v1/offers/{id}/accept":                     {"post": {"summary": "Aceptar oferta", "responses": {"200": {"description": "OK"}}}},
-            "/v1/customers":                              {"post": {"summary": "Crear cliente suelto", "responses": {"201": {"description": "Created"}}}},
-            "/v1/customers/{id}":                         {"get":  {"summary": "Obtener cliente", "responses": {"200": {"description": "OK"}}}},
-            "/v1/contracts":                              {"post": {"summary": "Crear contrato + signature_url", "responses": {"201": {"description": "Created"}}}},
-            "/v1/contracts/{id}":                         {"get":  {"summary": "Obtener contrato", "responses": {"200": {"description": "OK"}}}},
-            "/v1/contracts/{id}/mock-sign":               {"post": {"summary": "Firma directa (atajo programático)", "responses": {"200": {"description": "OK"}}}},
-            "/v1/sign/{id}":                              {"get":  {"summary": "Página HTML de firma", "security": [], "responses": {"200": {"description": "HTML"}}}},
-            "/v1/sign/{id}/confirm":                      {"post": {"summary": "Callback de firma desde el form", "security": [], "responses": {"200": {"description": "HTML"}}}},
-            "/v1/mobile-identities/activate":             {"post": {"summary": "Activar MobileIdentity", "responses": {"201": {"description": "Created"}}}},
-            "/v1/mobile-identities/{id}":                 {"get":  {"summary": "Obtener MobileIdentity", "responses": {"200": {"description": "OK"}}}},
-            "/v1/events":                                 {"get":  {"summary": "Últimos AuditEvents", "responses": {"200": {"description": "OK"}}}},
-            "/v1/demo/quick":                             {"post": {"summary": "Demo end-to-end (público, sin auth)", "security": [], "responses": {"200": {"description": "OK"}}}},
-            "/identity/{id}":                             {"get":  {"summary": "Página pública de MobileIdentity", "security": [], "responses": {"200": {"description": "HTML"}}}},
-            "/spec":                                      {"get":  {"summary": "Spec del protocolo en HTML", "security": [], "responses": {"200": {"description": "HTML"}}}},
+            # --- Discovery / health ---
+            "/v1/health":                                 {"get":  {"summary": "Healthcheck", "tags": ["Discovery"], "security": [], "responses": {"200": {"description": "OK"}}}},
+            "/v1/sim-options":                            {"get":  {"summary": "Países y SIMs disponibles", "tags": ["Discovery"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/events":                                 {"get":  {"summary": "Últimos AuditEvents", "tags": ["Discovery"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/demo/quick":                             {"post": {"summary": "Demo end-to-end (público, sin auth)", "tags": ["Discovery"], "security": [], "responses": {"200": {"description": "OK"}}}},
+            "/identity/{id}":                             {"get":  {"summary": "Página pública de MobileIdentity", "tags": ["Discovery"], "security": [], "responses": {"200": {"description": "HTML"}}}},
+            "/spec":                                      {"get":  {"summary": "Spec del protocolo en HTML", "tags": ["Discovery"], "security": [], "responses": {"200": {"description": "HTML"}}}},
+            "/diagram":                                   {"get":  {"summary": "Animación standalone del ciclo de vida del stack", "tags": ["Discovery"], "security": [], "responses": {"200": {"description": "HTML"}}}},
+
+            # --- Contratación (v1) ---
+            "/v1/sim-requests":                           {"post": {"summary": "Crear SIMRequest + oferta", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}}}},
+            "/v1/sim-requests/{id}":                      {"get":  {"summary": "Obtener SIMRequest", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/sim-requests/{id}/cancel":               {"post": {"summary": "Cancelar SIMRequest", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/sim-requests/{id}/customer-data":        {"post": {"summary": "Adjuntar datos del cliente", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}}}},
+            "/v1/offers/{id}":                            {"get":  {"summary": "Obtener oferta", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/offers/{id}/accept":                     {"post": {"summary": "Aceptar oferta", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/customers":                              {"post": {"summary": "Crear cliente suelto", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}}}},
+            "/v1/customers/{id}":                         {"get":  {"summary": "Obtener cliente", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/contracts":                              {"post": {"summary": "Crear contrato + signature_url", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}}}},
+            "/v1/contracts/{id}":                         {"get":  {"summary": "Obtener contrato", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/contracts/{id}/mock-sign":               {"post": {"summary": "Firma directa (atajo programático)", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/sign/{id}":                              {"get":  {"summary": "Página HTML de firma", "tags": ["Contratación"], "security": [], "responses": {"200": {"description": "HTML"}}}},
+            "/v1/sign/{id}/confirm":                      {"post": {"summary": "Callback de firma desde el form", "tags": ["Contratación"], "security": [], "responses": {"200": {"description": "HTML"}}}},
+            "/v1/mobile-identities/activate":             {"post": {"summary": "Activar MobileIdentity (devuelve agent_token)", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}}}},
+            "/v1/mobile-identities/{id}":                 {"get":  {"summary": "Obtener MobileIdentity", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/mobile-identities/{id}/rotate-token":    {"post": {"summary": "Rotar el agent_token (hard rotate)", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/mobile-identities/{id}/inbound-config":  {"post": {"summary": "Configurar el endpoint SIP de entrantes para un MID", "tags": ["Operations v2 · Voz"], "responses": {"200": {"description": "OK"}}}},
+
+            # --- Operations v2 · scoped por agent_token ---
+            "/v1/agent/self":                             {"get":  {"summary": "Info de la MobileIdentity dueña del agent_token", "tags": ["Operations v2 · SMS"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}, "401": {"description": "invalid_agent_token"}}}},
+            "/v1/agent/sms/send":                         {"post": {"summary": "Enviar un SMS", "tags": ["Operations v2 · SMS"], "security": [{"agentBearer": []}], "responses": {"201": {"description": "queued"}, "400": {"description": "validation"}, "401": {"description": "invalid_agent_token"}}}},
+            "/v1/agent/sms":                              {"get":  {"summary": "Listar SMS del MID", "tags": ["Operations v2 · SMS"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}}}},
+            "/v1/agent/calls/place":                      {"post": {"summary": "Originar una llamada bridge-by-API", "tags": ["Operations v2 · Voz"], "security": [{"agentBearer": []}], "responses": {"201": {"description": "initiated"}, "400": {"description": "validation"}}}},
+            "/v1/agent/calls":                            {"get":  {"summary": "Listar llamadas del MID", "tags": ["Operations v2 · Voz"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}}}},
+            "/v1/agent/calls/{id}":                       {"get":  {"summary": "Detalle de una llamada", "tags": ["Operations v2 · Voz"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}, "404": {"description": "call_not_found"}}}},
+            "/v1/agent/calls/{id}/hangup":                {"post": {"summary": "Colgar una llamada", "tags": ["Operations v2 · Voz"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}}}},
+
+            # --- Webhooks del partner telco ---
+            "/v1/_telco/sms/inbound":                     {"post": {"summary": "Entregar SMS entrante hacia un MID", "tags": ["Webhooks telco"], "security": [{"telcoKey": []}], "responses": {"201": {"description": "Created"}, "401": {"description": "invalid_telco_key"}, "503": {"description": "telco_inbound_disabled"}}}},
+            "/v1/_telco/calls/inbound":                   {"post": {"summary": "Consultar a dónde reenviar una llamada entrante", "tags": ["Webhooks telco"], "security": [{"telcoKey": []}], "responses": {"201": {"description": "Forward"}, "409": {"description": "no_inbound_sip_uri"}}}},
+            "/v1/_telco/calls/{id}/status":               {"post": {"summary": "Actualizar el estado de una llamada (ringing/in_progress/completed)", "tags": ["Webhooks telco"], "security": [{"telcoKey": []}], "responses": {"200": {"description": "OK"}, "409": {"description": "invalid_call_transition"}}}},
         },
     }
 
