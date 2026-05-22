@@ -34,10 +34,19 @@ _LOCK = threading.RLock()
 
 
 def _connect() -> sqlite3.Connection:
+    existed = os.path.exists(_DB_PATH)
     conn = sqlite3.connect(_DB_PATH, isolation_level=None, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")          # mejor para escrituras concurrentes
     conn.execute("PRAGMA synchronous=NORMAL")        # buen balance durabilidad/velocidad
     conn.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    # Si acabamos de crear el archivo, restringimos permisos: la DB contiene
+    # hashes de API keys, webhook secrets en plano, PII de customers, etc.
+    # 0o600 = solo owner puede leer/escribir.
+    if not existed:
+        try:
+            os.chmod(_DB_PATH, 0o600)
+        except OSError:
+            pass
     return conn
 
 

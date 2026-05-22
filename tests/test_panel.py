@@ -121,9 +121,9 @@ def test_mid_detail_shows_inbound_uri_when_configured(server_url, client, active
 def test_mid_detail_shows_webhook_when_registered(server_url, client, active_identity):
     mid = active_identity["mid"]
     client.post(f"/v1/mobile-identities/{mid}/webhooks",
-                json={"url": "https://hook.example/x", "events": ["sms.inbound"]})
+                json={"url": "https://example.com/x", "events": ["sms.inbound"]})
     with httpx.Client(base_url=server_url, timeout=5.0,
                       cookies={"ami-panel-token": "test_key_secret"}) as c:
         r = c.get(f"/panel/mid/{mid}")
-    assert "https://hook.example/x" in r.text
+    assert "https://example.com/x" in r.text
     assert "sms.inbound" in r.text

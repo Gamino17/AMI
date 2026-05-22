@@ -128,7 +128,10 @@ class LiveTelcoAdapter(TelcoAdapter):
                               {"telco_ref": m["telco_ref"]})
             # delivered llega después por DLR webhook
         else:
-            self._mark_failed(msg["id"], f"kannel_http_{status}: {body[:200]}")
+            # No incluimos el body en la razón: Kannel puede echar la sendsms
+            # URL con username=&password= en errores, y la razón se persiste
+            # en audit log. Solo el status code es seguro.
+            self._mark_failed(msg["id"], f"kannel_http_{status}")
 
     def _mark_failed(self, msg_id: str, reason: str) -> None:
         import ami_api
@@ -181,7 +184,7 @@ class LiveTelcoAdapter(TelcoAdapter):
             # transiciones (ringing/in_progress/completed) llegan por webhook
             # /v1/_telco/calls/{id}/status que el dialplan dispara.
         else:
-            self._fail_call(call["id"], f"ari_http_{status}: {response[:200]}")
+            self._fail_call(call["id"], f"ari_http_{status}")
 
     def _fail_call(self, call_id: str, reason: str) -> None:
         import ami_api

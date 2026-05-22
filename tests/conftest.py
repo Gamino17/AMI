@@ -43,6 +43,10 @@ def ami_api_module():
     # Tests no deben persistir state a disk entre runs — usamos :memory: para
     # que ami_storage queda en modo no-op.
     os.environ["AMI_DB_PATH"] = ":memory:"
+    # Permitir hosts loopback en los tests de webhooks (el sink HTTP corre en
+    # 127.0.0.1). En producción AMI_WEBHOOK_ALLOWED_HOSTS no debe incluir
+    # loopback.
+    os.environ.setdefault("AMI_WEBHOOK_ALLOWED_HOSTS", "127.0.0.1,localhost")
 
     if "ami_api" in sys.modules:
         module = importlib.reload(sys.modules["ami_api"])

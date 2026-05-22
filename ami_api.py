@@ -17,6 +17,12 @@ import ami_panel
 import ami_storage
 import ami_metrics
 import ami_pages_en
+import ami_security
+
+# Caps de seguridad / DoS. Tunables por env si hace falta.
+MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
+MAX_EVENTS_RETAINED = int(os.environ.get("AMI_MAX_EVENTS_RETAINED") or 5000)
+MAX_WEBHOOKS_PER_MID = int(os.environ.get("AMI_MAX_WEBHOOKS_PER_MID") or 10)
 
 STATE = {
     "sim_requests": {},
@@ -340,10 +346,14 @@ def _bootstrap_default_customer():
 
 def _customer_by_api_key(plain: str):
     """Resuelve una API key plain a un customer record. Devuelve None si no
-    existe customer con esa key o si está suspended."""
+    existe customer con esa key o si está suspended. Usa compare_digest para
+    no leakear el match por timing."""
     h = _hash_api_key(plain)
     for c in STATE["customer_accounts"].values():
-        if c.get("api_key_hash") == h and c.get("status") == "active":
+        stored = c.get("api_key_hash") or ""
+        if (c.get("status") == "active"
+                and len(stored) == len(h)
+                and secrets.compare_digest(stored, h)):
             return c
     return None
 
@@ -882,6 +892,10 @@ def event(action, entity_type, entity_id, data=None):
     e = {"id": new_id("evt"), "at": now(), "action": action,
          "entity_type": entity_type, "entity_id": entity_id, "data": data or {}}
     STATE["events"].append(e)
+    # Rotación: mantenemos solo los últimos N eventos para evitar growth sin
+    # tope. En v2 esto se mueve a una tabla con TTL en SQLite.
+    if len(STATE["events"]) > MAX_EVENTS_RETAINED:
+        del STATE["events"][:len(STATE["events"]) - MAX_EVENTS_RETAINED]
     return e
 
 
@@ -916,6 +930,23 @@ def respond_html(handler, status, html):
     body = html.encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
+    # Headers de seguridad. CSP es permisiva con Google Fonts y jsDelivr
+    # (mermaid en /partners). Si añadimos más recursos externos, ampliar
+    # aquí explícitamente — el default-src 'self' debe bloquear el resto.
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("X-Frame-Options", "DENY")
+    handler.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+    handler.send_header("Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'")
+    if _is_secure_request(handler):
+        handler.send_header("Strict-Transport-Security",
+                            "max-age=15552000; includeSubDomains")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -932,34 +963,63 @@ def respond_text(handler, status, text, content_type="text/plain; charset=utf-8"
     handler.wfile.write(body)
 
 
+class _BodyTooLarge(Exception): pass
+
+
 def read_json(handler):
-    n = int(handler.headers.get("Content-Length", "0") or 0)
-    if not n: return {}
-    return json.loads(handler.rfile.read(n).decode())
+    """Lee y deserializa el body JSON. Aplica un cap de MAX_BODY_BYTES para
+    evitar DoS de memoria por Content-Length gigante."""
+    try:
+        n = int(handler.headers.get("Content-Length", "0") or 0)
+    except ValueError:
+        raise ValueError("invalid Content-Length")
+    if n <= 0:
+        return {}
+    if n > MAX_BODY_BYTES:
+        raise _BodyTooLarge(f"body exceeds MAX_BODY_BYTES ({n} > {MAX_BODY_BYTES})")
+    raw = handler.rfile.read(n)
+    return json.loads(raw.decode())
 
 
 def read_form(handler):
-    """Parsea body form-urlencoded (panel login). Devuelve dict {key: value}."""
+    """Body form-urlencoded (panel login). Cap pequeño (8 KB) por seguridad."""
     from urllib.parse import parse_qs
-    n = int(handler.headers.get("Content-Length", "0") or 0)
-    if not n: return {}
+    try:
+        n = int(handler.headers.get("Content-Length", "0") or 0)
+    except ValueError:
+        return {}
+    if n <= 0:
+        return {}
+    if n > 8192:
+        raise _BodyTooLarge(f"form body exceeds 8KB ({n})")
     raw = handler.rfile.read(n).decode("utf-8", errors="replace")
     parsed = parse_qs(raw, keep_blank_values=True)
     return {k: v[0] for k, v in parsed.items()}
+
+
+def _is_secure_request(handler) -> bool:
+    """Detecta si la conexión llegó por HTTPS. Render y la mayoría de PaaS
+    terminan TLS en su proxy y pasan X-Forwarded-Proto=https. En localhost
+    el flag Secure haría que la cookie no se setee — por eso lo aplicamos
+    solo cuando detectamos HTTPS."""
+    xfp = (handler.headers.get("X-Forwarded-Proto") or "").lower()
+    return xfp == "https"
 
 
 def _redirect(handler, location, set_cookie=None, clear_cookie=False):
     """Helper: 302 redirect, opcionalmente set/clear cookie de panel."""
     handler.send_response(302)
     handler.send_header("Location", location)
+    secure = "; Secure" if _is_secure_request(handler) else ""
     if clear_cookie:
         handler.send_header("Set-Cookie",
-                            "ami-panel-token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+                            f"ami-panel-token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{secure}")
     elif set_cookie:
-        # Cookie HttpOnly + Secure (en prod sirve HTTPS) + SameSite=Lax para form-post.
+        # HttpOnly previene JS read · SameSite=Lax bloquea CSRF cross-site ·
+        # Secure en HTTPS evita que la cookie viaje en plain text.
         handler.send_header("Set-Cookie",
                             f"ami-panel-token={set_cookie}; Path=/; HttpOnly; "
-                            f"SameSite=Lax; Max-Age={60*60*24*7}")
+                            f"SameSite=Lax; Max-Age={60*60*24*7}{secure}")
     handler.send_header("Content-Length", "0")
     handler.end_headers()
 
@@ -1028,7 +1088,8 @@ def run_quick_demo():
     }
     STATE["customers"][cid] = customer
     req["customer_id"] = cid
-    event("customer_created", "customer", cid, customer)
+    event("customer_created", "customer", cid,
+          {"legal_name": customer["legal_name"], "sim_request_id": req["id"]})
     transition_sim_request(req, "customer_data_submitted")
     steps.append({"step": "customer_linked", "id": cid})
 
@@ -1044,7 +1105,8 @@ def run_quick_demo():
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
     }
     STATE["contracts"][contract_id] = contract
-    event("contract_created", "contract", contract_id, contract)
+    event("contract_created", "contract", contract_id,
+          {"offer_id": offer_id, "customer_id": cid})
     transition_sim_request(req, "signature_pending")
     steps.append({"step": "contract_created", "id": contract_id})
 
@@ -1067,7 +1129,9 @@ def run_quick_demo():
         "activated_at": now(),
     }
     STATE["mobile_identities"][mid] = identity
-    event("mobile_identity_active", "mobile_identity", mid, identity)
+    event("mobile_identity_active", "mobile_identity", mid,
+          {"contract_id": contract_id, "customer_id": cid,
+           "sim_type": identity["sim_type"]})
     transition_sim_request(req, "active")
     req["mobile_identity_id"] = mid
     steps.append({"step": "mobile_identity_active", "id": mid, "phone_number": phone})
@@ -2630,12 +2694,6 @@ def render_identity_page(identity):
 
           <dt data-lang="es">Contrato</dt><dt data-lang="en">Contract</dt>
           <dd><a href="{sign_url}">{html_escape(identity.get("contract_id","—"))}</a></dd>
-
-          <dt data-lang="es">Cliente</dt><dt data-lang="en">Customer</dt>
-          <dd>{html_escape(customer.get("legal_name","—"))}</dd>
-
-          <dt data-lang="es">NIF/Tax ID</dt><dt data-lang="en">Tax ID</dt>
-          <dd class="mono">{html_escape(customer.get("tax_id","—"))}</dd>
 
           <dt data-lang="es">Activado</dt><dt data-lang="en">Activated</dt>
           <dd class="mono">{html_escape(identity.get("activated_at","—"))}</dd>
@@ -6457,7 +6515,41 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/v1/sim-options":
             return response(self, 200, {"countries": COUNTRIES})
         if p == "/v1/events":
-            return response(self, 200, {"events": STATE["events"][-100:]})
+            # Multi-tenant: filtramos por los recursos del account del request.
+            # Eventos sin owner derivable (system-level) los devolvemos solo
+            # si el caller no tiene scope (modo admin / dev).
+            account_id = _request_account_id(self)
+            own_mids = {m["id"] for m in STATE["mobile_identities"].values()
+                        if not m.get("account_id") or m.get("account_id") == account_id}
+            own_sims = {s["id"] for s in STATE["sim_requests"].values()
+                        if not s.get("account_id") or s.get("account_id") == account_id}
+            own_contracts = {c["id"] for c in STATE["contracts"].values()
+                             if not c.get("account_id") or c.get("account_id") == account_id}
+            own_customers = {c["id"] for c in STATE["customers"].values()
+                             if not c.get("account_id") or c.get("account_id") == account_id}
+            own_offers = {o["id"] for o in STATE["offers"].values()
+                          if not o.get("account_id") or o.get("account_id") == account_id}
+            def _ev_owned(ev):
+                t, eid = ev.get("entity_type"), ev.get("entity_id")
+                if t == "mobile_identity": return eid in own_mids
+                if t == "sim_request":    return eid in own_sims
+                if t == "contract":       return eid in own_contracts
+                if t == "customer":       return eid in own_customers
+                if t == "offer":          return eid in own_offers
+                # Para sms/call/webhook hacemos lookup por entity_id porque
+                # algunos events no llevan `mid` en data (sms_sent, call_completed)
+                if t == "sms_message":
+                    msg = STATE["sms_messages"].get(eid)
+                    return bool(msg) and msg.get("mid") in own_mids
+                if t == "call":
+                    c = STATE["calls"].get(eid)
+                    return bool(c) and c.get("mid") in own_mids
+                if t == "webhook":
+                    wh = STATE["webhooks"].get(eid)
+                    return bool(wh) and wh.get("mid") in own_mids
+                return False
+            events = [e for e in STATE["events"] if _ev_owned(e)][-100:]
+            return response(self, 200, {"events": events})
         # Página HTML de firma (público; no requiere API key)
         m = re.match(r"^/v1/sign/([^/]+)$", p)
         if m:
@@ -6515,7 +6607,7 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/v1/mobile-identities/([^/]+)/limits$", p)
         if m:
             identity = STATE["mobile_identities"].get(m.group(1))
-            if not identity:
+            if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             limits = identity.setdefault("limits", ami_limits.new_limits())
             return response(self, 200, {"mid": m.group(1), "limits": limits})
@@ -6525,7 +6617,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             mid = m.group(1)
             identity = STATE["mobile_identities"].get(mid)
-            if not identity:
+            if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             return response(self, 200, ami_limits.usage_snapshot(identity))
 
@@ -6549,7 +6641,8 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/v1/mobile-identities/([^/]+)/webhooks$", p)
         if m:
             mid = m.group(1)
-            if not STATE["mobile_identities"].get(mid):
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             whs = [ami_webhooks.webhook_summary(w)
                    for w in STATE["webhooks"].values() if w["mid"] == mid]
@@ -6590,7 +6683,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/v1/_telco/sms/dlr":
             if not TELCO_INBOUND_KEY:
                 return response(self, 503, {"error": "telco_inbound_disabled"})
-            if self.headers.get("X-Telco-Key", "") != TELCO_INBOUND_KEY:
+            if not secrets.compare_digest(self.headers.get("X-Telco-Key", ""), TELCO_INBOUND_KEY):
                 return response(self, 401, {"error": "invalid_telco_key"})
             # Acepta JSON body o form/query (Kannel usa GET-via-POST con query).
             qs = dict(re.findall(r"([^&=?]+)=([^&]*)", urlparse(self.path).query or ""))
@@ -6635,7 +6728,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/v1/_telco/sms/inbound":
             if not TELCO_INBOUND_KEY:
                 return response(self, 503, {"error": "telco_inbound_disabled"})
-            if self.headers.get("X-Telco-Key", "") != TELCO_INBOUND_KEY:
+            if not secrets.compare_digest(self.headers.get("X-Telco-Key", ""), TELCO_INBOUND_KEY):
                 return response(self, 401, {"error": "invalid_telco_key"})
             try: data = read_json(self)
             except Exception as e:
@@ -6675,7 +6768,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/v1/_telco/calls/inbound":
             if not TELCO_INBOUND_KEY:
                 return response(self, 503, {"error": "telco_inbound_disabled"})
-            if self.headers.get("X-Telco-Key", "") != TELCO_INBOUND_KEY:
+            if not secrets.compare_digest(self.headers.get("X-Telco-Key", ""), TELCO_INBOUND_KEY):
                 return response(self, 401, {"error": "invalid_telco_key"})
             try: data = read_json(self)
             except Exception as e:
@@ -6691,7 +6784,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             if not TELCO_INBOUND_KEY:
                 return response(self, 503, {"error": "telco_inbound_disabled"})
-            if self.headers.get("X-Telco-Key", "") != TELCO_INBOUND_KEY:
+            if not secrets.compare_digest(self.headers.get("X-Telco-Key", ""), TELCO_INBOUND_KEY):
                 return response(self, 401, {"error": "invalid_telco_key"})
             try: data = read_json(self)
             except Exception as e:
@@ -6863,7 +6956,8 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/v1/sim-requests/([^/]+)/cancel$", p)
         if m:
             req = STATE["sim_requests"].get(m.group(1))
-            if not req: return response(self, 404, {"error": "sim_request_not_found"})
+            if not req or not _scoped(req, _request_account_id(self)):
+                return response(self, 404, {"error": "sim_request_not_found"})
             if req["status"] in TERMINAL:
                 return response(self, 409, {"error": "already_terminal", "status": req["status"]})
             try:
@@ -6884,7 +6978,8 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/v1/sim-requests/([^/]+)/customer-data$", p)
         if m:
             req = STATE["sim_requests"].get(m.group(1))
-            if not req: return response(self, 404, {"error": "sim_request_not_found"})
+            if not req or not _scoped(req, _request_account_id(self)):
+                return response(self, 404, {"error": "sim_request_not_found"})
             if req["status"] != "offer_accepted":
                 return response(self, 409, {
                     "error": "invalid_state",
@@ -6902,10 +6997,15 @@ class Handler(BaseHTTPRequestHandler):
                 "billing_email": payload["billing_email"], "address": payload["address"],
                 "representative_name": payload["representative_name"],
                 "created_at": now(),
+                "account_id": _request_account_id(self),
             }
             STATE["customers"][cid] = customer
             req["customer_id"] = cid
-            event("customer_created", "customer", cid, customer)
+            # Audit log SIN PII completa: solo ids + nombre legal para auditoría.
+            event("customer_created", "customer", cid,
+                  {"legal_name": customer["legal_name"],
+                   "sim_request_id": req["id"],
+                   "account_id": customer.get("account_id")})
             transition_sim_request(req, "customer_data_submitted")
             return response(self, 201, {"sim_request": req, "customer": customer})
 
@@ -6913,7 +7013,8 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/v1/offers/([^/]+)/accept$", p)
         if m:
             offer = STATE["offers"].get(m.group(1))
-            if not offer: return response(self, 404, {"error": "offer_not_found"})
+            if not offer or not _scoped(offer, _request_account_id(self)):
+                return response(self, 404, {"error": "offer_not_found"})
             if offer["status"] != "offer_created":
                 return response(self, 409, {"error": "offer_not_acceptable", "status": offer["status"]})
             offer["status"] = "offer_accepted"; offer["accepted_at"] = now()
@@ -6931,9 +7032,12 @@ class Handler(BaseHTTPRequestHandler):
                 "billing_email": data.get("billing_email"), "address": data.get("address"),
                 "representative_name": data.get("representative_name"),
                 "created_at": now(),
+                "account_id": _request_account_id(self),
             }
             STATE["customers"][cid] = customer
-            event("customer_created", "customer", cid, customer)
+            event("customer_created", "customer", cid,
+                  {"legal_name": customer["legal_name"],
+                   "account_id": customer.get("account_id")})
             return response(self, 201, customer)
 
         # Crear contrato (avanza la SIMRequest hasta signature_pending)
@@ -6963,14 +7067,21 @@ class Handler(BaseHTTPRequestHandler):
                 "account_id": _request_account_id(self),
             }
             STATE["contracts"][cid] = contract
-            event("contract_created", "contract", cid, contract)
+            # Audit log mínimo (sin signature_url ni PII)
+            event("contract_created", "contract", cid,
+                  {"offer_id": offer_id, "customer_id": customer_id,
+                   "account_id": contract.get("account_id")})
             if req and req["status"] == "customer_data_submitted":
                 transition_sim_request(req, "signature_pending")
             return response(self, 201, contract)
 
-        # Firma directa (atajo programático; la firma "real" pasa por /v1/sign/{id})
+        # Firma directa (atajo programático; la firma "real" pasa por /v1/sign/{id}).
+        # Multi-tenant: solo el account dueño del contrato puede usar este atajo.
         m = re.match(r"^/v1/contracts/([^/]+)/mock-sign$", p)
         if m:
+            contract = STATE["contracts"].get(m.group(1))
+            if not contract or not _scoped(contract, _request_account_id(self)):
+                return response(self, 404, {"error": "contract_not_found"})
             code, body = sign_contract(m.group(1))
             return response(self, code, body)
 
@@ -6979,7 +7090,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             mid = m.group(1)
             identity = STATE["mobile_identities"].get(mid)
-            if not identity:
+            if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             ok, reason, new_limits = ami_limits.update_limits(identity, data or {})
             if not ok:
@@ -6994,12 +7105,15 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             mid = m.group(1)
             identity = STATE["mobile_identities"].get(mid)
-            if not identity:
+            if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             url = (data.get("url") or "").strip()
-            if not url.startswith(("https://", "http://")):
-                return response(self, 400, {"error": "invalid_url",
-                                            "detail": "url must start with https:// or http://"})
+            # SSRF guard: validar scheme + IP (no loopback/private/link-local) +
+            # no permitir hosts internos. Centralizado en ami_security para
+            # poder testear; también re-validamos antes de cada delivery.
+            ok_url, reason = ami_security.is_safe_webhook_url(url)
+            if not ok_url:
+                return response(self, 400, {"error": "invalid_url", "detail": reason})
             events_raw = data.get("events") or ["*"]
             if not isinstance(events_raw, list):
                 return response(self, 400, {"error": "invalid_events"})
@@ -7008,6 +7122,11 @@ class Handler(BaseHTTPRequestHandler):
                     return response(self, 400, {"error": "unsupported_event",
                                                 "event": ev,
                                                 "supported": sorted(ami_webhooks.SUPPORTED_EVENTS)})
+            # Cap de webhooks por MID para evitar thread bombs en dispatch.
+            mid_webhooks = [w for w in STATE["webhooks"].values() if w["mid"] == mid]
+            if len(mid_webhooks) >= MAX_WEBHOOKS_PER_MID:
+                return response(self, 409, {"error": "webhook_limit_reached",
+                                             "limit": MAX_WEBHOOKS_PER_MID})
             wh = ami_webhooks.new_webhook(mid, url, events_raw)
             STATE["webhooks"][wh["id"]] = wh
             event("webhook_created", "webhook", wh["id"],
@@ -7022,10 +7141,14 @@ class Handler(BaseHTTPRequestHandler):
                                "podrá recuperar después.",
             })
 
-        # Borrar un webhook. Auth: API key del customer.
+        # Borrar un webhook. Auth: API key del customer. Multi-tenant scoping:
+        # rechazamos si el MID o el webhook no pertenecen al account del request.
         m = re.match(r"^/v1/mobile-identities/([^/]+)/webhooks/([^/]+)/delete$", p)
         if m:
             mid, wh_id = m.group(1), m.group(2)
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity or not _scoped(identity, _request_account_id(self)):
+                return response(self, 404, {"error": "webhook_not_found"})
             wh = STATE["webhooks"].get(wh_id)
             if not wh or wh["mid"] != mid:
                 return response(self, 404, {"error": "webhook_not_found"})
@@ -7041,7 +7164,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             mid = m.group(1)
             identity = STATE["mobile_identities"].get(mid)
-            if not identity:
+            if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             sip_uri = data.get("inbound_sip_uri")
             # Permitimos pasar null/"" para limpiar la config.
@@ -7063,7 +7186,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             mid = m.group(1)
             identity = STATE["mobile_identities"].get(mid)
-            if not identity:
+            if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             if identity.get("status") != "active":
                 return response(self, 409, {"error": "mobile_identity_not_active",
@@ -7104,7 +7227,11 @@ class Handler(BaseHTTPRequestHandler):
                 "account_id": contract.get("account_id") or _request_account_id(self),
             }
             STATE["mobile_identities"][mid] = identity
-            event("mobile_identity_active", "mobile_identity", mid, identity)
+            # Audit log mínimo (sin phone_number ni QR url completa).
+            event("mobile_identity_active", "mobile_identity", mid,
+                  {"contract_id": contract_id, "customer_id": contract["customer_id"],
+                   "account_id": identity.get("account_id"),
+                   "sim_type": identity["sim_type"]})
             if req and req["status"] == "provisioning":
                 transition_sim_request(req, "active")
                 req["mobile_identity_id"] = mid

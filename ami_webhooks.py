@@ -126,9 +126,32 @@ def dispatch_event(event: str, mid: str, data: dict) -> int:
 
 
 def _deliver_with_retries(wh_id: str, url: str, secret: str, body: bytes) -> None:
-    """Intenta entregar el webhook. Reintentos con backoff. Actualiza STATE."""
+    """Intenta entregar el webhook. Reintentos con backoff. Actualiza STATE.
+
+    Seguridad:
+      - Re-validamos la URL contra SSRF guard JUSTO antes del connect, para
+        defensar contra DNS rebinding (la IP puede haber cambiado desde el
+        create del webhook).
+      - Opener custom rechaza redirects 3xx (impide saltar a IP interna).
+      - Capamos el body de respuesta a 64 KiB para evitar DoS de memoria si
+        el endpoint malicioso responde gigabytes.
+    """
     import time
+    import ami_security
     from ami_api import STATE, now, event as audit_event
+
+    safe, reason = ami_security.is_safe_webhook_url(url)
+    if not safe:
+        # No reintentar; el endpoint nunca debió aceptarse en su día.
+        wh = STATE["webhooks"].get(wh_id)
+        if wh:
+            wh["last_delivery_at"] = now()
+            wh["last_delivery_status"] = "failed"
+            wh["failure_count"] = wh.get("failure_count", 0) + 1
+        audit_event("webhook_failed", "webhook", wh_id,
+                    {"error": f"ssrf_guard_{reason}"})
+        return
+
     sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     headers = {
         "Content-Type": "application/json",
@@ -136,6 +159,7 @@ def _deliver_with_retries(wh_id: str, url: str, secret: str, body: bytes) -> Non
         "X-Ami-Webhook-Id": wh_id,
         "User-Agent": "AMI/1.0 (+webhooks)",
     }
+    opener = ami_security.build_safe_opener()
     attempts = 0
     ok = False
     last_error = None
@@ -144,7 +168,9 @@ def _deliver_with_retries(wh_id: str, url: str, secret: str, body: bytes) -> Non
             req = urllib.request.Request(url, data=body, method="POST")
             for k, v in headers.items():
                 req.add_header(k, v)
-            with urllib.request.urlopen(req, timeout=DELIVERY_TIMEOUT_S) as r:
+            with opener.open(req, timeout=DELIVERY_TIMEOUT_S) as r:
+                # Cap del body para no agotar memoria con respuestas gigantes.
+                _ = r.read(65536)
                 if 200 <= r.status < 300:
                     ok = True
                     break

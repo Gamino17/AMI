@@ -229,10 +229,12 @@ def _progress_bar(consumed_pct) -> str:
 
 def render_home(account_id: str) -> str:
     """Dashboard principal del customer-account: lista MIDs + actividad +
-    spend, **filtrado por account_id**. Un customer NO ve los MIDs de otro."""
+    spend, **filtrado estricto por account_id**. Un customer NO ve los MIDs
+    de otro NI los legacy/demo sin owner (estos se atribuyen a un sentinel
+    aparte; el panel solo muestra los que son explícitamente del account)."""
     import ami_api, ami_limits
     mids = [m for m in ami_api.STATE["mobile_identities"].values()
-            if not m.get("account_id") or m.get("account_id") == account_id]
+            if m.get("account_id") == account_id]
     mids.sort(key=lambda i: i.get("activated_at") or "", reverse=True)
     mid_ids = {m["id"] for m in mids}
 
@@ -359,8 +361,9 @@ def render_mid_detail(mid: str, account_id: str) -> tuple[int, str]:
     identity = ami_api.STATE["mobile_identities"].get(mid)
     if not identity:
         return 404, _render_not_found()
-    owner = identity.get("account_id")
-    if owner and owner != account_id:
+    # Filter estricto: solo el dueño explícito. Legacy/demo MIDs sin owner
+    # NO se muestran a ningún customer.
+    if identity.get("account_id") != account_id:
         return 404, _render_not_found()
 
     snap = ami_limits.usage_snapshot(identity)
