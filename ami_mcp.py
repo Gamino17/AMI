@@ -201,6 +201,57 @@ async def list_sms(agent_token: str | None = None, limit: int = 20,
     return await _agent_get("/v1/agent/sms" + qs, agent_token)
 
 
+@mcp.tool(name="ami.place_call",
+          description="Origina una llamada saliente desde la MobileIdentity activa. "
+                      "AMI marca al PSTN y bridgea por SIP al callback_sip_uri "
+                      "(típicamente el endpoint SIP del cliente, p.ej. su URI Realtime "
+                      "de OpenAI). AMI NO ejecuta voz: sólo cursa la pipa.")
+async def place_call(to: str, callback_sip_uri: str,
+                     agent_token: str | None = None) -> dict:
+    return await _agent_post(
+        "/v1/agent/calls/place",
+        {"to": to, "callback_sip_uri": callback_sip_uri},
+        agent_token,
+    )
+
+
+@mcp.tool(name="ami.list_calls",
+          description="Lista las llamadas del MID asociado al agent_token, más reciente "
+                      "primero. Opcional: filtrar por dirección 'outbound' o 'inbound'.")
+async def list_calls(agent_token: str | None = None, limit: int = 20,
+                     direction: str | None = None) -> dict:
+    qs = f"?limit={int(limit)}"
+    if direction in ("outbound", "inbound"):
+        qs += f"&direction={direction}"
+    return await _agent_get("/v1/agent/calls" + qs, agent_token)
+
+
+@mcp.tool(name="ami.get_call",
+          description="Detalle de una llamada (scoped al MID del agent_token).")
+async def get_call(call_id: str, agent_token: str | None = None) -> dict:
+    return await _agent_get(f"/v1/agent/calls/{call_id}", agent_token)
+
+
+@mcp.tool(name="ami.hangup_call",
+          description="Termina una llamada en curso del MID asociado al agent_token. "
+                      "Idempotente sobre llamadas ya terminadas.")
+async def hangup_call(call_id: str, agent_token: str | None = None) -> dict:
+    return await _agent_post(f"/v1/agent/calls/{call_id}/hangup", {}, agent_token)
+
+
+@mcp.tool(name="ami.set_inbound_sip_uri",
+          description="Configura el endpoint SIP al que el partner debe reenviar las "
+                      "llamadas entrantes de un MID (típicamente el endpoint Realtime "
+                      "del cliente). Pasa null para limpiar la config. Auth: API key del "
+                      "customer (no agent_token).")
+async def set_inbound_sip_uri(mobile_identity_id: str,
+                              inbound_sip_uri: str | None) -> dict:
+    return await _post(
+        f"/v1/mobile-identities/{mobile_identity_id}/inbound-config",
+        {"inbound_sip_uri": inbound_sip_uri},
+    )
+
+
 @mcp.tool(name="ami.rotate_agent_token",
           description="Rota el agent_token de una MobileIdentity activa. "
                       "Invalida el token anterior al instante (hard rotate) y devuelve "

@@ -79,6 +79,7 @@ def reset_state(ami_api_module):
     state["events"].clear()
     state.get("agent_tokens", {}).clear()
     state.get("sms_messages", {}).clear()
+    state.get("calls", {}).clear()
     yield
 
 

@@ -22,6 +22,8 @@ STATE = {
     "agent_tokens": {},
     # Operations v2 · SMS. msg_id -> message record (ver schema en helpers SMS).
     "sms_messages": {},
+    # Operations v2 · Voz. call_id -> call record (ver schema en helpers Calls).
+    "calls": {},
 }
 
 COUNTRIES = {
@@ -306,6 +308,205 @@ def list_sms_for_mid(mid, limit=20, direction=None):
 # Webhook del partner telco: clave compartida en header X-Telco-Key.
 # Si no está seteada en el entorno, el endpoint queda deshabilitado en prod.
 TELCO_INBOUND_KEY = os.environ.get("AMI_TELCO_INBOUND_KEY") or None
+
+
+# ----- Operations v2 · Voz (bridge-by-API) -------------------------------
+# AMI es el operador / SIP provider. NO ejecuta Realtime ni hace media bridge:
+# el "cerebro" del audio vive en el endpoint SIP del cliente (típicamente
+# sip:<project>@sip.api.openai.com;transport=tls). AMI sólo origina la
+# llamada al PSTN y la bridgea SIP-to-SIP hacia ese destino.
+#
+# Schema de call record:
+#   id: call_xxx
+#   mid: MobileIdentity propietaria
+#   direction: 'outbound' | 'inbound'
+#   from: E.164 (nuestro número en outbound, externo en inbound)
+#   to:   E.164 (externo en outbound, nuestro número en inbound)
+#   callback_sip_uri: a dónde bridgea AMI (outbound) o se forwardea (inbound)
+#   status: initiated | ringing | in_progress | completed
+#                     | failed | no_answer | busy | cancelled
+#   created_at, started_at, ended_at: ISO (started cuando answered, ended al colgar)
+#   duration_sec: int (calculada al ended)
+#   hangup_cause: string libre del partner
+#   telco_ref: ref del switch (asterisk channel id, etc.)
+
+CALL_TERMINAL = {"completed", "failed", "no_answer", "busy", "cancelled"}
+CALL_TRANSITIONS = {
+    "initiated":   ["ringing", "failed", "cancelled"],
+    "ringing":     ["in_progress", "no_answer", "busy", "failed", "cancelled"],
+    "in_progress": ["completed", "failed"],
+}
+
+# sip: o sips: scheme + user@host[:port] + parámetros opcionales (;k=v...)
+_SIP_URI_RE = re.compile(
+    r"^sips?:[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+(?::\d{1,5})?(?:;[A-Za-z0-9._\-]+=[A-Za-z0-9._\-]+)*$"
+)
+
+
+def _validate_sip_uri(uri):
+    if not isinstance(uri, str): return False
+    return bool(_SIP_URI_RE.match(uri.strip()))
+
+
+def transition_call(call, new_status, **patch):
+    """Aplica una transición validada al call record y emite audit event."""
+    cur = call["status"]
+    if new_status not in CALL_TRANSITIONS.get(cur, []):
+        raise ValueError(f"invalid_call_transition: {cur} -> {new_status}")
+    call["status"] = new_status
+    if new_status == "in_progress" and not call.get("started_at"):
+        call["started_at"] = now()
+    if new_status in CALL_TERMINAL:
+        call["ended_at"] = now()
+        if call.get("started_at"):
+            try:
+                started = datetime.fromisoformat(call["started_at"])
+                ended = datetime.fromisoformat(call["ended_at"])
+                call["duration_sec"] = max(0, int((ended - started).total_seconds()))
+            except Exception:
+                pass
+    for k, v in patch.items():
+        if v is not None:
+            call[k] = v
+    event(f"call_{new_status}", "call", call["id"], {"from": cur, "to": new_status, **patch})
+
+
+def place_call_outbound(mid, to_raw, callback_sip_uri):
+    """Origina una llamada saliente desde el MID. AMI marca y la bridgea por SIP."""
+    identity = STATE["mobile_identities"].get(mid)
+    if not identity or identity.get("status") != "active":
+        return 409, {"error": "mobile_identity_not_active", "mid": mid}
+    to = _normalize_msisdn(to_raw)
+    if not to:
+        return 400, {"error": "invalid_to", "detail": "expected E.164 (+digits)"}
+    if not _validate_sip_uri(callback_sip_uri):
+        return 400, {"error": "invalid_callback_sip_uri",
+                     "detail": "expected sip:user@host[:port][;params]"}
+
+    call = {
+        "id": new_id("call"),
+        "mid": mid,
+        "direction": "outbound",
+        "from": _normalize_msisdn(identity["phone_number"]),
+        "to": to,
+        "callback_sip_uri": callback_sip_uri.strip(),
+        "status": "initiated",
+        "created_at": now(),
+        "started_at": None,
+        "ended_at": None,
+        "duration_sec": None,
+        "hangup_cause": None,
+        "telco_ref": None,
+    }
+    STATE["calls"][call["id"]] = call
+    event("call_placed", "call", call["id"],
+          {"mid": mid, "to": to, "callback_sip_uri": call["callback_sip_uri"]})
+
+    # Lifecycle simulado: initiated → ringing → in_progress → completed.
+    # En producción estas transiciones las dispara el partner telco / Asterisk
+    # vía /v1/_telco/calls/{id}/status. Aquí simulamos para v1.
+    _schedule_call_lifecycle(call["id"])
+    return 201, call
+
+
+def _schedule_call_lifecycle(call_id):
+    """Simula el ciclo de vida con threading.Timer (solo en in-memory v1)."""
+    import threading
+    def to_ringing():
+        c = STATE["calls"].get(call_id)
+        if c and c["status"] == "initiated":
+            try: transition_call(c, "ringing", telco_ref="mock:" + secrets.token_hex(6))
+            except ValueError: pass
+    def to_in_progress():
+        c = STATE["calls"].get(call_id)
+        if c and c["status"] == "ringing":
+            try: transition_call(c, "in_progress")
+            except ValueError: pass
+    def to_completed():
+        c = STATE["calls"].get(call_id)
+        if c and c["status"] == "in_progress":
+            try: transition_call(c, "completed", hangup_cause="normal_clearing")
+            except ValueError: pass
+    threading.Timer(0.15, to_ringing).start()
+    threading.Timer(0.40, to_in_progress).start()
+    threading.Timer(0.90, to_completed).start()
+
+
+def hangup_call(mid, call_id):
+    """Termina manualmente una llamada del MID. Idempotente sobre estados terminales."""
+    call = STATE["calls"].get(call_id)
+    if not call or call["mid"] != mid:
+        return 404, {"error": "call_not_found"}
+    if call["status"] in CALL_TERMINAL:
+        return 200, call  # ya estaba terminada — idempotente
+    # Desde initiated → cancelled; desde ringing → cancelled; desde in_progress → completed.
+    target = "cancelled" if call["status"] in ("initiated", "ringing") else "completed"
+    try:
+        transition_call(call, target, hangup_cause="hangup_by_agent")
+    except ValueError as e:
+        return 409, {"error": str(e)}
+    return 200, call
+
+
+def list_calls_for_mid(mid, limit=20, direction=None):
+    calls = [c for c in STATE["calls"].values() if c["mid"] == mid]
+    if direction in ("outbound", "inbound"):
+        calls = [c for c in calls if c["direction"] == direction]
+    calls.sort(key=lambda c: c["created_at"], reverse=True)
+    return calls[: max(1, min(int(limit or 20), 200))]
+
+
+def route_call_inbound(from_raw, to_raw, telco_ref=None):
+    """Decide a dónde reenviar una llamada entrante. El partner llama esto al
+    recibir la llamada por SS7/SIP en su lado; si AMI devuelve un sip_uri, el
+    partner hace SIP-forward; si no, rechaza con 486."""
+    to = _normalize_msisdn(to_raw)
+    if not to:
+        return 400, {"error": "invalid_to"}
+    mid, identity = _find_mid_by_phone(to)
+    if not mid:
+        return 404, {"error": "destination_not_found", "to": to}
+    if identity.get("status") != "active":
+        return 409, {"error": "mobile_identity_not_active", "mid": mid}
+    sip_uri = identity.get("inbound_sip_uri")
+    if not sip_uri:
+        # No hay endpoint configurado para entrantes — el partner debe rechazar.
+        event("call_inbound_rejected", "mobile_identity", mid,
+              {"reason": "no_inbound_sip_uri", "from": from_raw, "to": to})
+        return 409, {"error": "no_inbound_sip_uri",
+                     "detail": "MID has no inbound endpoint configured",
+                     "mid": mid}
+    call = {
+        "id": new_id("call"),
+        "mid": mid,
+        "direction": "inbound",
+        "from": _normalize_msisdn(from_raw) or from_raw,
+        "to": to,
+        "callback_sip_uri": sip_uri,
+        "status": "initiated",
+        "created_at": now(),
+        "started_at": None,
+        "ended_at": None,
+        "duration_sec": None,
+        "hangup_cause": None,
+        "telco_ref": telco_ref,
+    }
+    STATE["calls"][call["id"]] = call
+    event("call_inbound_routed", "call", call["id"],
+          {"mid": mid, "from": call["from"], "forward_to": sip_uri})
+    return 201, {"call_id": call["id"], "forward_sip_uri": sip_uri, "mid": mid}
+
+
+def update_call_status(call_id, new_status, **patch):
+    """Webhook del partner: cambia el estado de una llamada según señalización real."""
+    call = STATE["calls"].get(call_id)
+    if not call:
+        return 404, {"error": "call_not_found"}
+    try:
+        transition_call(call, new_status, **patch)
+    except ValueError as e:
+        return 409, {"error": str(e), "current": call["status"]}
+    return 200, call
 
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -5625,6 +5826,33 @@ class Handler(BaseHTTPRequestHandler):
             msgs = list_sms_for_mid(rec["mid"], limit=limit, direction=direction)
             return response(self, 200, {"messages": msgs, "count": len(msgs)})
 
+        # Listar llamadas del MID asociado al agent_token.
+        if p == "/v1/agent/calls":
+            rec = validate_agent_token(self)
+            if not rec:
+                return response(self, 401, {"error": "invalid_agent_token"})
+            qs = dict(re.findall(r"([^&=?]+)=([^&]*)", urlparse(self.path).query or ""))
+            try:
+                limit = int(qs.get("limit", "20"))
+            except ValueError:
+                return response(self, 400, {"error": "invalid_limit"})
+            direction = qs.get("direction")
+            if direction and direction not in ("outbound", "inbound"):
+                return response(self, 400, {"error": "invalid_direction"})
+            calls = list_calls_for_mid(rec["mid"], limit=limit, direction=direction)
+            return response(self, 200, {"calls": calls, "count": len(calls)})
+
+        # Detalle de una llamada (scoped al MID del token).
+        m = re.match(r"^/v1/agent/calls/([^/]+)$", p)
+        if m:
+            rec = validate_agent_token(self)
+            if not rec:
+                return response(self, 401, {"error": "invalid_agent_token"})
+            call = STATE["calls"].get(m.group(1))
+            if not call or call["mid"] != rec["mid"]:
+                return response(self, 404, {"error": "call_not_found"})
+            return response(self, 200, call)
+
         if not is_public("GET", p) and not check_auth(self):
             return response(self, 401, {"error": "unauthorized"})
         if p == "/" or p == "/index.html":
@@ -5707,6 +5935,62 @@ class Handler(BaseHTTPRequestHandler):
                 body=data.get("body", ""),
                 telco_ref=data.get("telco_ref"),
             )
+            return response(self, code, body)
+
+        # Originar una llamada saliente. bridge-by-API: AMI marca al PSTN y
+        # bridgea por SIP al callback_sip_uri (típicamente el endpoint Realtime
+        # del cliente). AMI NO ejecuta voz — sólo cursa la pipa.
+        if p == "/v1/agent/calls/place":
+            rec = validate_agent_token(self)
+            if not rec:
+                return response(self, 401, {"error": "invalid_agent_token"})
+            try: data = read_json(self)
+            except Exception as e:
+                return response(self, 400, {"error": "invalid_json", "detail": str(e)})
+            code, body = place_call_outbound(
+                rec["mid"], data.get("to"), data.get("callback_sip_uri", ""))
+            return response(self, code, body)
+
+        # Colgar una llamada del MID asociado al token.
+        m = re.match(r"^/v1/agent/calls/([^/]+)/hangup$", p)
+        if m:
+            rec = validate_agent_token(self)
+            if not rec:
+                return response(self, 401, {"error": "invalid_agent_token"})
+            code, body = hangup_call(rec["mid"], m.group(1))
+            return response(self, code, body)
+
+        # Webhooks del partner telco para voz (mismo X-Telco-Key que SMS).
+        if p == "/v1/_telco/calls/inbound":
+            if not TELCO_INBOUND_KEY:
+                return response(self, 503, {"error": "telco_inbound_disabled"})
+            if self.headers.get("X-Telco-Key", "") != TELCO_INBOUND_KEY:
+                return response(self, 401, {"error": "invalid_telco_key"})
+            try: data = read_json(self)
+            except Exception as e:
+                return response(self, 400, {"error": "invalid_json", "detail": str(e)})
+            code, body = route_call_inbound(
+                from_raw=data.get("from"),
+                to_raw=data.get("to"),
+                telco_ref=data.get("telco_ref"),
+            )
+            return response(self, code, body)
+
+        m = re.match(r"^/v1/_telco/calls/([^/]+)/status$", p)
+        if m:
+            if not TELCO_INBOUND_KEY:
+                return response(self, 503, {"error": "telco_inbound_disabled"})
+            if self.headers.get("X-Telco-Key", "") != TELCO_INBOUND_KEY:
+                return response(self, 401, {"error": "invalid_telco_key"})
+            try: data = read_json(self)
+            except Exception as e:
+                return response(self, 400, {"error": "invalid_json", "detail": str(e)})
+            new_status = data.get("status")
+            if not new_status:
+                return response(self, 400, {"error": "missing_status"})
+            patch = {k: data.get(k) for k in ("hangup_cause", "telco_ref")
+                     if data.get(k) is not None}
+            code, body = update_call_status(m.group(1), new_status, **patch)
             return response(self, code, body)
 
         if not is_public("POST", p) and not check_auth(self):
@@ -5880,6 +6164,30 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             code, body = sign_contract(m.group(1))
             return response(self, code, body)
+
+        # Configurar el endpoint SIP de entrantes para un MID. Auth: API key del
+        # customer (Nivel 1). El partner usa este URI para hacer SIP-forward de
+        # las llamadas entrantes hacia el destino del cliente (típicamente su
+        # endpoint Realtime de OpenAI).
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/inbound-config$", p)
+        if m:
+            mid = m.group(1)
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity:
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            sip_uri = data.get("inbound_sip_uri")
+            # Permitimos pasar null/"" para limpiar la config.
+            if sip_uri in (None, ""):
+                identity["inbound_sip_uri"] = None
+                event("mid_inbound_config_cleared", "mobile_identity", mid, {})
+                return response(self, 200, {"mid": mid, "inbound_sip_uri": None})
+            if not _validate_sip_uri(sip_uri):
+                return response(self, 400, {"error": "invalid_inbound_sip_uri",
+                                            "detail": "expected sip:user@host[:port][;params]"})
+            identity["inbound_sip_uri"] = sip_uri.strip()
+            event("mid_inbound_config_updated", "mobile_identity", mid,
+                  {"inbound_sip_uri": identity["inbound_sip_uri"]})
+            return response(self, 200, {"mid": mid, "inbound_sip_uri": identity["inbound_sip_uri"]})
 
         # Activar MobileIdentity (telco mock = lo único realmente simulado)
         # Rotación de agent_token. Auth: API key del customer (Nivel 1).
