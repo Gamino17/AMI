@@ -252,6 +252,76 @@ async def set_inbound_sip_uri(mobile_identity_id: str,
     )
 
 
+@mcp.tool(name="ami.create_webhook",
+          description="Registra un webhook saliente para un MID. AMI hará POST al "
+                      "url cuando ocurran eventos del MID. Devuelve el secret una "
+                      "sola vez (úsalo para verificar X-Ami-Signature de cada entrega).")
+async def create_webhook(mobile_identity_id: str, url: str,
+                          events: list[str] | None = None) -> dict:
+    return await _post(
+        f"/v1/mobile-identities/{mobile_identity_id}/webhooks",
+        {"url": url, "events": events or ["*"]},
+    )
+
+
+@mcp.tool(name="ami.list_webhooks",
+          description="Lista los webhooks salientes registrados para un MID (sin "
+                      "exponer el secret completo, sólo prefijo).")
+async def list_webhooks(mobile_identity_id: str) -> dict:
+    return await _get(f"/v1/mobile-identities/{mobile_identity_id}/webhooks")
+
+
+@mcp.tool(name="ami.delete_webhook",
+          description="Elimina un webhook saliente de un MID por su id.")
+async def delete_webhook(mobile_identity_id: str, webhook_id: str) -> dict:
+    return await _post(
+        f"/v1/mobile-identities/{mobile_identity_id}/webhooks/{webhook_id}/delete"
+    )
+
+
+@mcp.tool(name="ami.get_limits",
+          description="Lee los límites (rate + budget + countries) configurados "
+                      "para un MID. Auth: API key del customer.")
+async def get_limits(mobile_identity_id: str) -> dict:
+    return await _get(f"/v1/mobile-identities/{mobile_identity_id}/limits")
+
+
+@mcp.tool(name="ami.update_limits",
+          description="Actualiza los límites del MID (patch parcial). Acepta "
+                      "sms_per_hour, sms_per_day, calls_per_hour, calls_per_day, "
+                      "monthly_budget_eur, allowed_country_prefixes (lista de '+34', etc.).")
+async def update_limits(mobile_identity_id: str,
+                         sms_per_hour: int | None = None,
+                         sms_per_day: int | None = None,
+                         calls_per_hour: int | None = None,
+                         calls_per_day: int | None = None,
+                         monthly_budget_eur: float | None = None,
+                         allowed_country_prefixes: list[str] | None = None) -> dict:
+    payload: dict[str, Any] = {}
+    if sms_per_hour is not None: payload["sms_per_hour"] = sms_per_hour
+    if sms_per_day is not None: payload["sms_per_day"] = sms_per_day
+    if calls_per_hour is not None: payload["calls_per_hour"] = calls_per_hour
+    if calls_per_day is not None: payload["calls_per_day"] = calls_per_day
+    if monthly_budget_eur is not None: payload["monthly_budget_eur"] = monthly_budget_eur
+    if allowed_country_prefixes is not None: payload["allowed_country_prefixes"] = allowed_country_prefixes
+    return await _post(f"/v1/mobile-identities/{mobile_identity_id}/limits", payload)
+
+
+@mcp.tool(name="ami.get_usage",
+          description="Lee el usage actual del MID (SMS hoy, llamadas hoy, gasto este "
+                      "mes, % consumido por tope). Auth: API key del customer.")
+async def get_usage(mobile_identity_id: str) -> dict:
+    return await _get(f"/v1/mobile-identities/{mobile_identity_id}/usage")
+
+
+@mcp.tool(name="ami.get_my_usage",
+          description="Como get_usage pero scoped al MID del agent_token. Útil para "
+                      "que el agente compruebe cuánto le queda antes de pedir más SMS "
+                      "o llamadas.")
+async def get_my_usage(agent_token: str | None = None) -> dict:
+    return await _agent_get("/v1/agent/usage", agent_token)
+
+
 @mcp.tool(name="ami.rotate_agent_token",
           description="Rota el agent_token de una MobileIdentity activa. "
                       "Invalida el token anterior al instante (hard rotate) y devuelve "

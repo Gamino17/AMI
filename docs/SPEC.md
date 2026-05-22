@@ -189,11 +189,33 @@ Auth: `agent_token` scoped al MID (Nivel 2).
 **Audit:**
 - `ami.list_events`
 
-### 3.3 Métodos de gobierno (v2 — pendientes)
+### 3.3 Métodos de gobierno
 
-- `ami.set_limits`, `ami.get_usage`
-- `ami.suspend_identity`, `ami.release_number`
-- `ami.audit_log`
+Auth: `AMI_API_KEY` del customer (Nivel 1).
+
+**Rate limits + spending:**
+- `ami.get_limits(mid)` — devuelve `sms_per_hour`, `sms_per_day`, `calls_per_hour`,
+  `calls_per_day`, `monthly_budget_eur`, `allowed_country_prefixes`.
+- `ami.update_limits(mid, ...)` — patch parcial. Defaults razonables al activar el MID.
+- `ami.get_usage(mid)` — contadores actuales + % consumido + tarifas vigentes.
+- `ami.get_my_usage(agent_token)` — alias scoped por agent_token (Nivel 2).
+- Enforcement automático: `send_sms` y `place_call` devuelven 429 con la razón
+  específica (`sms_hourly_limit_exceeded`, `country_not_allowed`,
+  `monthly_budget_exceeded`, etc.).
+
+**Webhooks salientes:**
+- `ami.create_webhook(mid, url, events)` — el cliente registra una URL que AMI
+  llamará con eventos del MID (`sms.inbound`, `sms.delivered`, `sms.failed`,
+  `call.inbound`, `call.completed`, `call.failed`, o `*`). Devuelve un secret
+  **una sola vez** que se usa para verificar el header `X-Ami-Signature: sha256=…`.
+- `ami.list_webhooks(mid)`, `ami.delete_webhook(mid, webhook_id)`.
+- Entrega: hasta 3 reintentos con backoff [0.5, 2, 8]s. Tras 10 fallos
+  consecutivos, el webhook se auto-desactiva.
+- Patrón cliente: el receptor reconstruye `HMAC-SHA256(secret, raw_body)` y lo
+  compara con el header; si no coincide, ignorar.
+
+**Pendientes v2.x:**
+- `ami.suspend_identity`, `ami.release_number`, `ami.audit_log`.
 
 ### 3.4 Modelo de voz: AMI = operador, NO Realtime
 

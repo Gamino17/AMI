@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 import hashlib, json, os, re, secrets, uuid
 
 from ami_telco import get_active_adapter
+import ami_webhooks
+import ami_limits
 
 STATE = {
     "sim_requests": {},
@@ -26,6 +28,8 @@ STATE = {
     "sms_messages": {},
     # Operations v2 · Voz. call_id -> call record (ver schema en helpers Calls).
     "calls": {},
+    # Webhooks salientes scoped por MID. wh_id -> webhook record.
+    "webhooks": {},
 }
 
 COUNTRIES = {
@@ -223,6 +227,12 @@ def send_sms_outbound(mid, to_raw, body):
     if len(body) > 1000:
         return 400, {"error": "body_too_long", "max": 1000, "got": len(body)}
 
+    # Enforcement de límites + presupuesto. Si bloquea, 429 con razón.
+    ok, reason = ami_limits.check_and_charge_sms(identity, to)
+    if not ok:
+        event("sms_blocked", "mobile_identity", mid, {"reason": reason, "to": to})
+        return 429, {"error": reason, "mid": mid}
+
     msg = {
         "id": new_id("msg"),
         "mid": mid,
@@ -275,6 +285,7 @@ def record_sms_inbound(from_raw, to_raw, body, telco_ref=None):
     STATE["sms_messages"][msg["id"]] = msg
     event("sms_inbound", "sms_message", msg["id"],
           {"mid": mid, "from": from_, "len": len(body)})
+    ami_webhooks.dispatch_event("sms.inbound", mid, msg)
     return 201, msg
 
 
@@ -352,6 +363,14 @@ def transition_call(call, new_status, **patch):
         if v is not None:
             call[k] = v
     event(f"call_{new_status}", "call", call["id"], {"from": cur, "to": new_status, **patch})
+    # Contabilidad y webhook saliente al cliente.
+    if new_status == "completed":
+        identity = STATE["mobile_identities"].get(call.get("mid"))
+        if identity:
+            ami_limits.account_call_duration(identity, call.get("duration_sec"))
+        ami_webhooks.dispatch_event("call.completed", call["mid"], call)
+    elif new_status in ("failed", "no_answer", "busy", "cancelled"):
+        ami_webhooks.dispatch_event("call.failed", call["mid"], call)
 
 
 def place_call_outbound(mid, to_raw, callback_sip_uri):
@@ -365,6 +384,12 @@ def place_call_outbound(mid, to_raw, callback_sip_uri):
     if not _validate_sip_uri(callback_sip_uri):
         return 400, {"error": "invalid_callback_sip_uri",
                      "detail": "expected sip:user@host[:port][;params]"}
+
+    # Enforcement de límites antes de marcar al PSTN.
+    ok, reason = ami_limits.check_and_reserve_call(identity, to)
+    if not ok:
+        event("call_blocked", "mobile_identity", mid, {"reason": reason, "to": to})
+        return 429, {"error": reason, "mid": mid}
 
     call = {
         "id": new_id("call"),
@@ -456,6 +481,7 @@ def route_call_inbound(from_raw, to_raw, telco_ref=None):
     STATE["calls"][call["id"]] = call
     event("call_inbound_routed", "call", call["id"],
           {"mid": mid, "from": call["from"], "forward_to": sip_uri})
+    ami_webhooks.dispatch_event("call.inbound", mid, call)
     return 201, {"call_id": call["id"], "forward_sip_uri": sip_uri, "mid": mid}
 
 
@@ -1324,6 +1350,15 @@ def _tools_for_landing():
         ("ami.get_call",                "Detalle de una llamada (scoped al MID)."),
         ("ami.hangup_call",             "Termina una llamada en curso del MID."),
         ("ami.set_inbound_sip_uri",     "Configura el endpoint SIP al que reenviar las llamadas entrantes del MID."),
+        # --- Webhooks salientes ---
+        ("ami.create_webhook",          "Registra un webhook saliente para un MID (eventos sms/call inbound y status)."),
+        ("ami.list_webhooks",           "Lista los webhooks registrados para un MID."),
+        ("ami.delete_webhook",          "Elimina un webhook por id."),
+        # --- Rate limits + spending ---
+        ("ami.get_limits",              "Lee los límites (rate + budget + countries) de un MID."),
+        ("ami.update_limits",           "Actualiza los límites del MID (patch parcial)."),
+        ("ami.get_usage",               "Lee el usage actual del MID (auth: customer)."),
+        ("ami.get_my_usage",            "Lee el usage del MID dueño del agent_token (auth: agente)."),
         # --- Audit ---
         ("ami.list_events",             "Devuelve los últimos AuditEvents (debug e inspección)."),
     ]
@@ -1346,6 +1381,12 @@ def _endpoints_for_landing():
         ("GET",  "/v1/mobile-identities/{id}",              "Consulta una MobileIdentity."),
         ("POST", "/v1/mobile-identities/{id}/rotate-token", "Rota el agent_token (hard rotate)."),
         ("POST", "/v1/mobile-identities/{id}/inbound-config","Setea el endpoint SIP para llamadas entrantes."),
+        ("GET",  "/v1/mobile-identities/{id}/limits",       "Lee los límites del MID."),
+        ("POST", "/v1/mobile-identities/{id}/limits",       "Actualiza los límites del MID."),
+        ("GET",  "/v1/mobile-identities/{id}/usage",        "Usage actual del MID (auth: customer)."),
+        ("POST", "/v1/mobile-identities/{id}/webhooks",     "Crea un webhook saliente para un MID."),
+        ("GET",  "/v1/mobile-identities/{id}/webhooks",     "Lista los webhooks del MID."),
+        ("POST", "/v1/mobile-identities/{id}/webhooks/{wh}/delete","Borra un webhook."),
         # --- Operations v2 · scoped por agent_token (Nivel 2) ---
         ("GET",  "/v1/agent/self",                          "Info de la MobileIdentity dueña del agent_token."),
         ("POST", "/v1/agent/sms/send",                      "Envía un SMS desde el MID (auth: agent_token)."),
@@ -1354,6 +1395,7 @@ def _endpoints_for_landing():
         ("GET",  "/v1/agent/calls",                         "Lista las llamadas del MID."),
         ("GET",  "/v1/agent/calls/{id}",                    "Detalle de una llamada del MID."),
         ("POST", "/v1/agent/calls/{id}/hangup",             "Termina una llamada del MID."),
+        ("GET",  "/v1/agent/usage",                         "Usage del MID dueño del agent_token."),
         # --- Audit y demo ---
         ("GET",  "/v1/events",                              "Últimos AuditEvents."),
         ("POST", "/v1/demo/quick",                          "Flujo end-to-end completo en una llamada (público, sin auth)."),
@@ -5781,6 +5823,8 @@ def render_openapi():
             {"name": "Contratación", "description": "Solicitud, oferta, datos del cliente, contrato, firma y activación."},
             {"name": "Operations v2 · SMS", "description": "Envío y listado de SMS scoped por agent_token."},
             {"name": "Operations v2 · Voz", "description": "Llamadas bridge-by-API: AMI cursa la pipa SIP, el cliente ejecuta la voz."},
+            {"name": "Limits", "description": "Rate limits (hora/día), presupuesto mensual y allowlist de países por MID."},
+            {"name": "Webhooks", "description": "Webhooks salientes desde AMI hacia el cliente (firmados con HMAC-SHA256)."},
             {"name": "Webhooks telco", "description": "Endpoints internos llamados por el partner telco (autenticados con X-Telco-Key)."},
             {"name": "Discovery", "description": "Salud, audit, demo, páginas públicas."},
         ],
@@ -5812,6 +5856,16 @@ def render_openapi():
             "/v1/mobile-identities/{id}":                 {"get":  {"summary": "Obtener MobileIdentity", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
             "/v1/mobile-identities/{id}/rotate-token":    {"post": {"summary": "Rotar el agent_token (hard rotate)", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
             "/v1/mobile-identities/{id}/inbound-config":  {"post": {"summary": "Configurar el endpoint SIP de entrantes para un MID", "tags": ["Operations v2 · Voz"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/mobile-identities/{id}/limits":         {
+                "get":  {"summary": "Leer los límites del MID", "tags": ["Limits"], "responses": {"200": {"description": "OK"}}},
+                "post": {"summary": "Actualizar los límites del MID (patch parcial)", "tags": ["Limits"], "responses": {"200": {"description": "OK"}, "400": {"description": "validation"}}},
+            },
+            "/v1/mobile-identities/{id}/usage":          {"get":  {"summary": "Usage actual del MID (auth: customer)", "tags": ["Limits"], "responses": {"200": {"description": "OK"}}}},
+            "/v1/mobile-identities/{id}/webhooks":       {
+                "get":  {"summary": "Listar webhooks salientes del MID", "tags": ["Webhooks"], "responses": {"200": {"description": "OK"}}},
+                "post": {"summary": "Crear un webhook saliente (devuelve el secret una vez)", "tags": ["Webhooks"], "responses": {"201": {"description": "Created"}, "400": {"description": "validation"}}},
+            },
+            "/v1/mobile-identities/{id}/webhooks/{wh}/delete": {"post": {"summary": "Borrar un webhook", "tags": ["Webhooks"], "responses": {"200": {"description": "OK"}, "404": {"description": "webhook_not_found"}}}},
 
             # --- Operations v2 · scoped por agent_token ---
             "/v1/agent/self":                             {"get":  {"summary": "Info de la MobileIdentity dueña del agent_token", "tags": ["Operations v2 · SMS"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}, "401": {"description": "invalid_agent_token"}}}},
@@ -5821,6 +5875,7 @@ def render_openapi():
             "/v1/agent/calls":                            {"get":  {"summary": "Listar llamadas del MID", "tags": ["Operations v2 · Voz"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}}}},
             "/v1/agent/calls/{id}":                       {"get":  {"summary": "Detalle de una llamada", "tags": ["Operations v2 · Voz"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}, "404": {"description": "call_not_found"}}}},
             "/v1/agent/calls/{id}/hangup":                {"post": {"summary": "Colgar una llamada", "tags": ["Operations v2 · Voz"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}}}},
+            "/v1/agent/usage":                            {"get":  {"summary": "Usage del MID dueño del agent_token", "tags": ["Limits"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}}}},
 
             # --- Webhooks del partner telco ---
             "/v1/_telco/sms/inbound":                     {"post": {"summary": "Entregar SMS entrante hacia un MID", "tags": ["Webhooks telco"], "security": [{"telcoKey": []}], "responses": {"201": {"description": "Created"}, "401": {"description": "invalid_telco_key"}, "503": {"description": "telco_inbound_disabled"}}}},
@@ -5858,6 +5913,17 @@ class Handler(BaseHTTPRequestHandler):
                 "token_created_at": rec["created_at"],
                 "status": "active",
             })
+
+        # Vista del usage del MID dueño del agent_token. El agente la usa para
+        # saber cuánto le queda antes de chocar con un tope diario / budget.
+        if p == "/v1/agent/usage":
+            rec = validate_agent_token(self)
+            if not rec:
+                return response(self, 401, {"error": "invalid_agent_token"})
+            identity = STATE["mobile_identities"].get(rec["mid"])
+            if not identity:
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            return response(self, 200, ami_limits.usage_snapshot(identity))
 
         # Listar SMS del MID asociado al agent_token.
         # Query params: ?limit=20&direction=outbound|inbound
@@ -5947,6 +6013,34 @@ class Handler(BaseHTTPRequestHandler):
             return respond_html(self, 200, render_experience_page())
         if p == "/diagram":
             return respond_html(self, 200, render_diagram_page())
+        # Leer límites del MID. Auth: API key del customer.
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/limits$", p)
+        if m:
+            identity = STATE["mobile_identities"].get(m.group(1))
+            if not identity:
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            limits = identity.setdefault("limits", ami_limits.new_limits())
+            return response(self, 200, {"mid": m.group(1), "limits": limits})
+
+        # Leer el usage del MID. Auth: API key del customer (vista global).
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/usage$", p)
+        if m:
+            mid = m.group(1)
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity:
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            return response(self, 200, ami_limits.usage_snapshot(identity))
+
+        # Listar webhooks salientes de un MID. Auth: API key del customer.
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/webhooks$", p)
+        if m:
+            mid = m.group(1)
+            if not STATE["mobile_identities"].get(mid):
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            whs = [ami_webhooks.webhook_summary(w)
+                   for w in STATE["webhooks"].values() if w["mid"] == mid]
+            return response(self, 200, {"webhooks": whs, "count": len(whs)})
+
         m = re.match(r"^/v1/(sim-requests|offers|customers|contracts|mobile-identities)/([^/]+)$", p)
         if m:
             table = m.group(1).replace("-", "_")
@@ -5997,6 +6091,7 @@ class Handler(BaseHTTPRequestHandler):
                 msg["delivered_at"] = now()
                 if telco_ref: msg["telco_ref"] = telco_ref
                 event("sms_delivered", "sms_message", msg_id, {})
+                ami_webhooks.dispatch_event("sms.delivered", msg["mid"], msg)
                 return response(self, 200, msg)
             if status_raw in ("failed", "rejected", "expired", "2", "4", "8", "16"):
                 if msg["status"] in ("queued", "sent"):
@@ -6004,6 +6099,7 @@ class Handler(BaseHTTPRequestHandler):
                     if telco_ref: msg["telco_ref"] = telco_ref
                     event("sms_failed", "sms_message", msg_id,
                           {"reason": status_raw, "telco_ref": telco_ref})
+                    ami_webhooks.dispatch_event("sms.failed", msg["mid"], msg)
                 return response(self, 200, msg)
             return response(self, 400, {"error": "unknown_status", "status": status_raw})
 
@@ -6253,6 +6349,65 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             code, body = sign_contract(m.group(1))
             return response(self, code, body)
+
+        # Actualizar límites del MID (patch parcial). Auth: API key del customer.
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/limits$", p)
+        if m:
+            mid = m.group(1)
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity:
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            ok, reason, new_limits = ami_limits.update_limits(identity, data or {})
+            if not ok:
+                return response(self, 400, {"error": reason})
+            event("limits_updated", "mobile_identity", mid, {"new": new_limits})
+            return response(self, 200, {"mid": mid, "limits": new_limits})
+
+        # Registrar un webhook saliente para un MID. AMI hará POST a la url
+        # con eventos del MID (sms.inbound, call.inbound, etc.). El secret
+        # devuelto se usa para verificar HMAC-SHA256 de cada entrega.
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/webhooks$", p)
+        if m:
+            mid = m.group(1)
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity:
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            url = (data.get("url") or "").strip()
+            if not url.startswith(("https://", "http://")):
+                return response(self, 400, {"error": "invalid_url",
+                                            "detail": "url must start with https:// or http://"})
+            events_raw = data.get("events") or ["*"]
+            if not isinstance(events_raw, list):
+                return response(self, 400, {"error": "invalid_events"})
+            for ev in events_raw:
+                if ev != "*" and ev not in ami_webhooks.SUPPORTED_EVENTS:
+                    return response(self, 400, {"error": "unsupported_event",
+                                                "event": ev,
+                                                "supported": sorted(ami_webhooks.SUPPORTED_EVENTS)})
+            wh = ami_webhooks.new_webhook(mid, url, events_raw)
+            STATE["webhooks"][wh["id"]] = wh
+            event("webhook_created", "webhook", wh["id"],
+                  {"mid": mid, "url": url, "events": events_raw})
+            # Devolvemos el secret en PLANO una sola vez en esta respuesta;
+            # las consultas posteriores solo muestran prefix.
+            return response(self, 201, {
+                **ami_webhooks.webhook_summary(wh),
+                "secret": wh["secret"],
+                "secret_hint": "Guarda este secret. Lo necesitas para verificar "
+                               "el header X-Ami-Signature de cada entrega. No se "
+                               "podrá recuperar después.",
+            })
+
+        # Borrar un webhook. Auth: API key del customer.
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/webhooks/([^/]+)/delete$", p)
+        if m:
+            mid, wh_id = m.group(1), m.group(2)
+            wh = STATE["webhooks"].get(wh_id)
+            if not wh or wh["mid"] != mid:
+                return response(self, 404, {"error": "webhook_not_found"})
+            del STATE["webhooks"][wh_id]
+            event("webhook_deleted", "webhook", wh_id, {"mid": mid})
+            return response(self, 200, {"id": wh_id, "deleted": True})
 
         # Configurar el endpoint SIP de entrantes para un MID. Auth: API key del
         # customer (Nivel 1). El partner usa este URI para hacer SIP-forward de
