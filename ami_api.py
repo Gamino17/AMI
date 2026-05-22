@@ -51,7 +51,7 @@ TERMINAL = {"active", "cancelled", "rejected", "failed"}
 API_KEY = os.environ.get("AMI_API_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick",)
 PUBLIC_POST_REGEX = re.compile(r"^/v1/sign/[^/]+/confirm$")
@@ -4599,6 +4599,741 @@ def render_experience_page():
 </html>"""
 
 
+def render_diagram_page():
+    """Página /diagram: SOLO la animación del stack en vivo, en grande, sin chrome.
+
+    Diseñada para enviar como enlace standalone — un único bloque que cuenta el
+    ciclo de vida completo de una identidad móvil (provisión, SMS, llamada) en
+    loop. Comparte el mismo motor (canvas + timeline + IntersectionObserver) que
+    la sección cinema de /experience pero con stage más grande y nada alrededor.
+    """
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMI · Diagrama del stack</title>
+<meta name="description" content="El ciclo de vida completo de una identidad móvil para agentes AI — provisión, SMS, llamada bidireccional — sobre stack propio. En loop.">
+<link rel="icon" type="image/svg+xml" href="{FAVICON_SVG_DATA_URI}" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {{
+    --bg: #06060a;
+    --bg-soft: #0c0c14;
+    --surface: #14141d;
+    --line: #1f1f2c;
+    --ink: #ededf2;
+    --ink-soft: #8888a0;
+    --ink-mute: #5a5a70;
+    --accent: #8b6cff;
+    --accent-2: #5dd1ff;
+    --accent-bg: rgba(139,108,255,0.10);
+    --green: #4ade80;
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", "SF Mono", "Menlo", "Monaco", monospace;
+  }}
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; padding: 0; }}
+  body {{
+    font-family: var(--sans);
+    color: var(--ink);
+    background:
+      radial-gradient(ellipse 90% 60% at 50% 0%, rgba(139,108,255,0.10), transparent 70%),
+      radial-gradient(ellipse 70% 50% at 50% 100%, rgba(93,209,255,0.06), transparent 70%),
+      var(--bg);
+    background-attachment: fixed;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }}
+  ::selection {{ background: var(--accent); color: #fff; }}
+  a {{ color: var(--accent-2); text-decoration: none; }}
+
+  /* HEADER minimal */
+  .dgm-header {{
+    padding: 1.4rem 1.75rem;
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: 1480px; margin: 0 auto; width: 100%;
+  }}
+  .dgm-brand {{
+    font-family: var(--mono); font-weight: 700; font-size: 1rem;
+    letter-spacing: 0.02em; display: flex; align-items: center; gap: 0.6rem;
+    color: var(--ink); text-decoration: none;
+  }}
+  .dgm-brand .dot {{ color: var(--accent); }}
+  .dgm-nav {{ display: flex; align-items: center; gap: 1.4rem; }}
+  .dgm-nav a {{ color: var(--ink-soft); font-size: 0.85rem; font-weight: 500; font-family: var(--mono); }}
+  .dgm-nav a:hover {{ color: var(--ink); }}
+
+  /* HERO: solo eyebrow + título corto + bajada */
+  .dgm-hero {{
+    text-align: center;
+    padding: 1.5rem 1.75rem 1rem;
+    max-width: 900px; margin: 0 auto;
+  }}
+  .eyebrow {{
+    font-family: var(--mono); font-size: 0.72rem; font-weight: 600;
+    color: var(--accent); text-transform: uppercase; letter-spacing: 0.18em;
+    margin-bottom: 1rem;
+  }}
+  .dgm-hero h1 {{
+    font-size: clamp(1.8rem, 4vw, 2.8rem);
+    font-weight: 700; letter-spacing: -0.025em;
+    margin: 0 0 1rem;
+    line-height: 1.1;
+  }}
+  .dgm-hero h1 .grad {{
+    background: linear-gradient(180deg, #c2b3ff 10%, #7a5cff 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }}
+  .dgm-hero .sub {{
+    color: var(--ink-soft); font-size: 1rem;
+    margin: 0 auto; max-width: 640px;
+  }}
+
+  /* STAGE WRAP — más ancho y alto que en /experience */
+  .dgm-stage-wrap {{
+    flex: 1;
+    width: 100%;
+    max-width: 1480px;
+    margin: 0 auto;
+    padding: 1.5rem 1.75rem 2rem;
+    display: flex; flex-direction: column; align-items: center;
+  }}
+
+  /* === BLOQUE CINEMA (idéntico a /experience, con stage más grande) ====== */
+  .cinema-stage {{
+    position: relative;
+    width: 100%; max-width: 1380px;
+    height: 640px;
+    background: radial-gradient(ellipse at center, rgba(139,108,255,0.06) 0%, transparent 70%), var(--bg-soft);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    overflow: hidden;
+    box-shadow: 0 30px 80px -30px rgba(123,92,255,0.25);
+  }}
+  .cinema-canvas {{
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none; z-index: 1;
+  }}
+  .cinema-actor {{
+    position: absolute;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    z-index: 2;
+    width: 130px;
+  }}
+  .cinema-actor.agent {{ left: 11%; top: 50%; }}
+  .cinema-actor.world {{ left: 89%; top: 50%; }}
+  .cinema-stack {{
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    display: flex; flex-direction: column; gap: 0.55rem;
+    z-index: 2; min-width: 200px;
+  }}
+  .cinema-stack-title {{
+    font-family: var(--mono); font-size: 0.65rem;
+    color: var(--ink-mute);
+    text-align: center;
+    letter-spacing: 0.18em; text-transform: uppercase;
+    margin-bottom: 0.4rem;
+    font-weight: 600;
+  }}
+  .cinema-module {{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 0.55rem 0.85rem;
+    font-family: var(--mono); font-size: 0.8rem;
+    color: var(--ink-soft);
+    text-align: center;
+    transition: border-color 0.25s, background 0.25s, color 0.25s, box-shadow 0.25s, transform 0.25s;
+  }}
+  .cinema-module.active {{
+    border-color: var(--accent);
+    background: var(--accent-bg);
+    color: var(--ink);
+    box-shadow: 0 0 22px rgba(139,108,255,0.45);
+    transform: scale(1.06);
+  }}
+  .cinema-actor-icon {{
+    width: 66px; height: 66px;
+    background: var(--surface);
+    border: 2px solid currentColor;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 0.65rem;
+    position: relative;
+    font-size: 1.65rem;
+    transition: box-shadow 0.3s, transform 0.3s;
+  }}
+  .cinema-actor.agent .cinema-actor-icon {{ color: var(--accent-2); }}
+  .cinema-actor.world .cinema-actor-icon {{ color: var(--green); }}
+  .cinema-actor-name {{
+    font-family: var(--mono); font-size: 0.85rem;
+    color: var(--ink); font-weight: 500;
+  }}
+  .cinema-actor-meta {{
+    font-family: var(--mono); font-size: 0.78rem;
+    color: var(--ink-soft); margin-top: 0.4rem;
+    min-height: 1rem; transition: color 0.4s;
+  }}
+  .cinema-actor-meta.identity {{ color: var(--accent-2); font-weight: 500; }}
+  .cinema-actor.pulsing .cinema-actor-icon {{
+    box-shadow: 0 0 0 0 currentColor;
+    animation: cinema-pulse-anim 1.2s ease-out infinite;
+  }}
+  @keyframes cinema-pulse-anim {{
+    0%   {{ box-shadow: 0 0 0 0 rgba(93,209,255,0.5); }}
+    100% {{ box-shadow: 0 0 0 26px rgba(93,209,255,0); }}
+  }}
+  .cinema-actor.world.pulsing .cinema-actor-icon {{
+    animation-name: cinema-pulse-world;
+  }}
+  @keyframes cinema-pulse-world {{
+    0%   {{ box-shadow: 0 0 0 0 rgba(74,222,128,0.5); }}
+    100% {{ box-shadow: 0 0 0 26px rgba(74,222,128,0); }}
+  }}
+  .cinema-bubble {{
+    position: absolute;
+    bottom: 100%; left: 50%;
+    transform: translateX(-50%) translateY(0);
+    margin-bottom: 0.7rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.55rem 0.95rem;
+    font-family: var(--mono); font-size: 0.78rem;
+    color: var(--ink);
+    white-space: nowrap;
+    max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+    opacity: 0; transition: opacity 0.35s, transform 0.35s;
+    pointer-events: none;
+  }}
+  .cinema-bubble.show {{
+    opacity: 1;
+    transform: translateX(-50%) translateY(-4px);
+  }}
+  .cinema-bubble::after {{
+    content: ""; position: absolute;
+    top: 100%; left: 50%; transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: var(--surface);
+  }}
+  .cinema-status {{
+    text-align: center;
+    margin: 1.5rem auto 0;
+    font-family: var(--mono); font-size: 0.92rem;
+    color: var(--ink-soft);
+    min-height: 1.5rem;
+    max-width: 900px;
+    transition: opacity 0.3s;
+  }}
+  .cinema-status .act {{
+    color: var(--accent);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 0.74rem;
+    margin-right: 0.7rem;
+    padding: 0.18rem 0.6rem;
+    background: var(--accent-bg);
+    border-radius: 4px;
+  }}
+  .cinema-controls {{ text-align: center; margin-top: 1rem; }}
+  .cinema-replay-btn {{
+    background: transparent; border: 1px solid var(--line);
+    color: var(--ink-soft); cursor: pointer;
+    font-family: var(--mono); font-size: 0.82rem;
+    padding: 0.55rem 1.2rem; border-radius: 6px;
+    transition: border-color 0.15s, color 0.15s;
+  }}
+  .cinema-replay-btn:hover {{ border-color: var(--accent); color: var(--ink); }}
+  .cinema-finale {{
+    position: absolute; inset: 0; z-index: 5;
+    background: radial-gradient(circle, rgba(8,8,12,0.95), rgba(8,8,12,0.85));
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 0.8rem;
+    text-align: center;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    padding: 1.5rem;
+  }}
+  .cinema-finale.show {{ opacity: 1; }}
+  .cinema-finale h3 {{
+    font-size: clamp(1.8rem, 4vw, 3rem);
+    font-weight: 700; letter-spacing: -0.02em; margin: 0;
+    background: linear-gradient(180deg, #ffffff 30%, #b8b8d8 130%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }}
+  .cinema-finale p {{
+    font-family: var(--mono); font-size: 0.9rem;
+    color: var(--ink-soft); margin: 0;
+    letter-spacing: 0.04em;
+  }}
+
+  /* FOOTER muy fino */
+  .dgm-footer {{
+    border-top: 1px solid var(--line);
+    padding: 1.2rem 1.75rem;
+    font-family: var(--mono); font-size: 0.78rem;
+    color: var(--ink-mute);
+    display: flex; justify-content: space-between; align-items: center;
+    max-width: 1480px; margin: 0 auto; width: 100%;
+    flex-wrap: wrap; gap: 0.6rem;
+  }}
+  .dgm-footer a {{ color: var(--ink-soft); }}
+  .dgm-footer a:hover {{ color: var(--accent-2); }}
+
+  @media (max-width: 720px) {{
+    .dgm-header {{ padding: 1rem 1.25rem; }}
+    .dgm-nav {{ gap: 0.9rem; }}
+    .dgm-nav a {{ font-size: 0.78rem; }}
+    .dgm-hero {{ padding: 1rem 1.25rem 0.5rem; }}
+    .dgm-stage-wrap {{ padding: 1rem 1rem 1.5rem; }}
+
+    /* Cinema en móvil: layout VERTICAL · agente arriba, stack centro, mundo abajo */
+    .cinema-stage {{ height: 640px; border-radius: 14px; }}
+    .cinema-actor {{ width: 110px; }}
+    .cinema-actor.agent {{ left: 50%; top: 12%; }}
+    .cinema-actor.world {{ left: 50%; top: 88%; }}
+    .cinema-actor-icon {{ width: 52px; height: 52px; font-size: 1.25rem; }}
+    .cinema-actor-name {{ font-size: 0.78rem; }}
+    .cinema-actor-meta {{ font-size: 0.72rem; }}
+
+    .cinema-stack {{
+      flex-direction: row;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.4rem;
+      min-width: 0;
+      max-width: calc(100% - 2rem);
+    }}
+    .cinema-stack-title {{ width: 100%; margin-bottom: 0.5rem; }}
+    .cinema-module {{
+      font-size: 0.66rem;
+      padding: 0.35rem 0.6rem;
+      flex: 0 0 auto;
+    }}
+
+    .cinema-bubble {{
+      font-size: 0.7rem;
+      max-width: 200px;
+      white-space: normal;
+      text-align: center;
+      line-height: 1.4;
+      padding: 0.45rem 0.75rem;
+    }}
+    /* Burbuja del agente en móvil: aparece DEBAJO del actor */
+    .cinema-actor.agent .cinema-bubble {{
+      bottom: auto;
+      top: 100%;
+      margin-bottom: 0;
+      margin-top: 0.65rem;
+    }}
+    .cinema-actor.agent .cinema-bubble::after {{
+      top: auto;
+      bottom: 100%;
+      border-top-color: transparent;
+      border-bottom-color: var(--surface);
+    }}
+
+    .cinema-status {{ font-size: 0.82rem; padding: 0 1rem; }}
+    .cinema-status .act {{ font-size: 0.66rem; padding: 0.1rem 0.5rem; margin-right: 0.5rem; }}
+    .cinema-replay-btn {{ font-size: 0.76rem; padding: 0.5rem 1rem; }}
+    .cinema-finale h3 {{ font-size: clamp(1.4rem, 6vw, 2.6rem); }}
+    .cinema-finale p {{ font-size: 0.74rem; padding: 0 1rem; }}
+  }}
+</style>
+</head>
+<body>
+
+  <header class="dgm-header">
+    <a href="/" class="dgm-brand">
+      {AMI_LOGO_SVG} AMI<span class="dot">.</span>
+    </a>
+    <nav class="dgm-nav">
+      <a href="/experience">Experience</a>
+      <a href="/spec">Spec</a>
+      <a href="/">Inicio</a>
+    </nav>
+  </header>
+
+  <section class="dgm-hero">
+    <div class="eyebrow">live diagram</div>
+    <h1>Cómo respira <span class="grad">el stack</span>.</h1>
+    <p class="sub">
+      El ciclo de vida completo de una identidad móvil — provisión, SMS, llamada
+      bidireccional — sobre nuestro propio stack. En loop.
+    </p>
+  </section>
+
+  <main class="dgm-stage-wrap">
+    <div class="cinema-stage" id="cinemaStage">
+      <canvas class="cinema-canvas" id="cinemaCanvas"></canvas>
+
+      <div class="cinema-actor agent" id="actAgent">
+        <div class="cinema-actor-icon">◉</div>
+        <div class="cinema-actor-name">Agente</div>
+        <div class="cinema-actor-meta" id="agentMeta">agente AI</div>
+        <div class="cinema-bubble" id="agentBubble"></div>
+      </div>
+
+      <div class="cinema-stack">
+        <div class="cinema-stack-title">AMI · stack propio</div>
+        <div class="cinema-module" id="modBackend">Backend</div>
+        <div class="cinema-module" id="modKannel">Kannel</div>
+        <div class="cinema-module" id="modAsterisk">Asterisk</div>
+        <div class="cinema-module" id="modNumbers">Numbers</div>
+        <div class="cinema-module" id="modSip">SIP gateway</div>
+      </div>
+
+      <div class="cinema-actor world" id="actWorld">
+        <div class="cinema-actor-icon">▲</div>
+        <div class="cinema-actor-name">Mundo</div>
+        <div class="cinema-actor-meta">destinatario</div>
+        <div class="cinema-bubble" id="worldBubble"></div>
+      </div>
+
+      <div class="cinema-finale" id="cinemaFinale">
+        <h3>Todo bajo nuestro stack.</h3>
+        <p>Cero proveedores externos · Cero APIs de terceros · Cero SIMs físicas</p>
+      </div>
+    </div>
+
+    <div class="cinema-status" id="cinemaStatus"><span class="act">acto 1</span>provisión del número</div>
+    <div class="cinema-controls">
+      <button class="cinema-replay-btn" id="cinemaReplayBtn" type="button">↻ replay</button>
+    </div>
+  </main>
+
+  <footer class="dgm-footer">
+    <span>AMI v1 · diagrama del stack en vivo</span>
+    <a href="/experience">Ver la experience completa →</a>
+  </footer>
+
+<script>
+  // ============================================================
+  //  DIAGRAM · live stack story (loop infinito, vanilla)
+  //  Mismo motor que la sección cinema de /experience.
+  // ============================================================
+  (function() {{
+    const stage    = document.getElementById('cinemaStage');
+    if (!stage) return;
+    const canvas   = document.getElementById('cinemaCanvas');
+    const ctx      = canvas.getContext('2d');
+    const reduced  = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const dpr      = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    let W = 0, H = 0;
+
+    function resizeStage() {{
+      const rect = stage.getBoundingClientRect();
+      W = rect.width; H = rect.height;
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }}
+    resizeStage();
+    window.addEventListener('resize', resizeStage);
+
+    function pos(id) {{
+      const el = document.getElementById(id);
+      if (!el) return {{ x: 0, y: 0 }};
+      const stageRect = stage.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      return {{
+        x: r.left - stageRect.left + r.width  / 2,
+        y: r.top  - stageRect.top  + r.height / 2
+      }};
+    }}
+
+    let particles = [];
+    function emit(fromId, toId, color, opts) {{
+      opts = opts || {{}};
+      const a = pos(fromId), b = pos(toId);
+      particles.push({{
+        fromX: a.x, fromY: a.y, toX: b.x, toY: b.y,
+        x: a.x, y: a.y, t: 0,
+        speed: opts.speed || 0.012,
+        color: color || '#5dd1ff',
+        size:  opts.size  || 3,
+        tail:  opts.tail  !== false
+      }});
+    }}
+
+    function draw() {{
+      ctx.clearRect(0, 0, W, H);
+      particles.forEach(p => {{
+        p.t += p.speed;
+        p.x = p.fromX + (p.toX - p.fromX) * p.t;
+        p.y = p.fromY + (p.toY - p.fromY) * p.t;
+        const fade = p.t > 0.85 ? (1 - (p.t - 0.85) / 0.15) : 1;
+        if (p.tail) {{
+          ctx.strokeStyle = p.color;
+          ctx.globalAlpha = 0.35 * fade;
+          ctx.lineWidth = 1.4;
+          const back = 0.07;
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(
+            p.fromX + (p.toX - p.fromX) * Math.max(0, p.t - back),
+            p.fromY + (p.toY - p.fromY) * Math.max(0, p.t - back)
+          );
+          ctx.stroke();
+        }}
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = fade;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }});
+      particles = particles.filter(p => p.t < 1);
+      requestAnimationFrame(draw);
+    }}
+    requestAnimationFrame(draw);
+
+    function activate(id, ms) {{
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.classList.add('active');
+      timeouts.push(setTimeout(() => el.classList.remove('active'), ms || 1400));
+    }}
+    function pulseActor(id, ms) {{
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.classList.add('pulsing');
+      timeouts.push(setTimeout(() => el.classList.remove('pulsing'), ms || 1300));
+    }}
+    function showBubble(id, text, ms) {{
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text;
+      el.classList.add('show');
+      if (ms !== 0) timeouts.push(setTimeout(() => el.classList.remove('show'), ms || 2000));
+    }}
+    function setMeta(text, isIdentity) {{
+      const el = document.getElementById('agentMeta');
+      el.textContent = text;
+      el.classList.toggle('identity', !!isIdentity);
+    }}
+    function setStatus(act, text) {{
+      const el = document.getElementById('cinemaStatus');
+      if (act) {{
+        el.innerHTML = '<span class="act">acto ' + act + '</span>' + text;
+      }} else {{
+        el.innerHTML = text;
+      }}
+    }}
+
+    let timeouts = [];
+    let intervals = [];
+    function at(ms, fn) {{ timeouts.push(setTimeout(fn, ms)); }}
+    function clearAll() {{
+      timeouts.forEach(clearTimeout);
+      intervals.forEach(clearInterval);
+      timeouts = []; intervals = [];
+    }}
+
+    function resetStage() {{
+      ['modBackend','modKannel','modAsterisk','modNumbers','modSip'].forEach(id => {{
+        document.getElementById(id).classList.remove('active');
+      }});
+      ['actAgent','actWorld'].forEach(id => {{
+        document.getElementById(id).classList.remove('pulsing');
+      }});
+      ['agentBubble','worldBubble'].forEach(id => {{
+        document.getElementById(id).classList.remove('show');
+      }});
+      document.getElementById('cinemaFinale').classList.remove('show');
+      setMeta('agente AI', false);
+    }}
+
+    function runStory() {{
+      clearAll();
+      resetStage();
+
+      // ============== ACTO 1 · Provisión ==============
+      at(0, () => {{
+        setStatus(1, 'el agente solicita un número');
+        pulseActor('actAgent', 1100);
+      }});
+      at(700, () => {{
+        showBubble('agentBubble', 'request_number_offer({{...}})');
+        emit('actAgent', 'modBackend', '#5dd1ff');
+      }});
+      at(1300, () => {{
+        activate('modBackend', 1900);
+        setStatus(1, 'backend: validate · KYC · contract · policy');
+      }});
+      at(2200, () => emit('modBackend', 'modNumbers', '#a78bff'));
+      at(2800, () => {{
+        activate('modNumbers', 1700);
+        setStatus(1, 'numbers: asignación desde inventario propio');
+      }});
+      at(3900, () => emit('modNumbers', 'modBackend', '#a78bff'));
+      at(4500, () => {{
+        activate('modBackend', 800);
+        emit('modBackend', 'actAgent', '#a78bff');
+      }});
+      at(5300, () => {{
+        setMeta('+34 600 549 832', true);
+        showBubble('agentBubble', 'mobile identity active ✓', 1700);
+        setStatus(1, 'identidad activa · +34 600 549 832');
+      }});
+
+      // ============== ACTO 2 · SMS saliente ==============
+      at(7800, () => {{
+        setStatus(2, 'el agente envía un SMS');
+        showBubble('agentBubble', '"Recuerdo: dentista mañana 10:00"', 2200);
+      }});
+      at(8600, () => emit('actAgent', 'modBackend', '#5dd1ff'));
+      at(9200, () => {{
+        activate('modBackend', 1200);
+        setStatus(2, 'policy check: allowed · within spend limit');
+      }});
+      at(9900, () => emit('modBackend', 'modKannel', '#a78bff'));
+      at(10400, () => {{
+        activate('modKannel', 1500);
+        setStatus(2, 'kannel: SUBMIT_SM por SMPP');
+      }});
+      at(11100, () => emit('modKannel', 'modSip', '#a78bff'));
+      at(11500, () => activate('modSip', 1300));
+      at(11800, () => emit('modSip', 'actWorld', '#82e0a4'));
+      at(12600, () => {{
+        showBubble('worldBubble', '✉ SMS recibido', 2400);
+        pulseActor('actWorld', 1200);
+        setStatus(2, 'destinatario recibe el SMS');
+      }});
+
+      // ============== ACTO 3 · SMS entrante ==============
+      at(15400, () => {{
+        setStatus(3, 'el destinatario responde');
+        showBubble('worldBubble', '"OK, allí estaré"', 2400);
+        pulseActor('actWorld', 900);
+      }});
+      at(16400, () => emit('actWorld', 'modSip', '#82e0a4'));
+      at(17000, () => {{
+        activate('modSip', 1100);
+        emit('modSip', 'modKannel', '#a78bff');
+      }});
+      at(17600, () => {{
+        activate('modKannel', 1500);
+        setStatus(3, 'kannel: DELIVER_SM · enrutamiento al agente');
+      }});
+      at(18400, () => emit('modKannel', 'modBackend', '#a78bff'));
+      at(19000, () => {{
+        activate('modBackend', 1200);
+        setStatus(3, 'backend: audit log · push notification');
+      }});
+      at(19700, () => emit('modBackend', 'actAgent', '#a78bff'));
+      at(20500, () => {{
+        showBubble('agentBubble', '← "OK, allí estaré"', 2400);
+        pulseActor('actAgent', 900);
+        setStatus(3, 'agente lee la respuesta');
+      }});
+
+      // ============== ACTO 4 · Llamada + audio bidireccional ==============
+      at(23400, () => {{
+        setStatus(4, 'el agente inicia una llamada');
+        showBubble('agentBubble', '☎ dial(+34 ...)', 1800);
+        pulseActor('actAgent', 1400);
+      }});
+      at(24400, () => emit('actAgent', 'modBackend', '#5dd1ff'));
+      at(25000, () => activate('modBackend', 1000));
+      at(25400, () => emit('modBackend', 'modAsterisk', '#a78bff'));
+      at(26000, () => {{
+        activate('modAsterisk', 2400);
+        setStatus(4, 'asterisk: SIP INVITE');
+      }});
+      at(26500, () => emit('modAsterisk', 'modSip', '#a78bff'));
+      at(26900, () => activate('modSip', 2000));
+      at(27200, () => emit('modSip', 'actWorld', '#82e0a4'));
+      at(28000, () => {{
+        showBubble('worldBubble', '📞 ring ring…', 1400);
+        pulseActor('actWorld', 1500);
+      }});
+      at(29200, () => {{
+        setStatus(4, 'llamada en curso · audio bidireccional');
+        const audioId = setInterval(() => {{
+          emit('actAgent', 'actWorld', '#5dd1ff', {{ speed: 0.025, size: 2, tail: false }});
+          emit('actWorld', 'actAgent', '#82e0a4', {{ speed: 0.025, size: 2, tail: false }});
+        }}, 180);
+        intervals.push(audioId);
+        timeouts.push(setTimeout(() => clearInterval(audioId), 3200));
+      }});
+      at(32600, () => setStatus(4, 'call ended · 3.4s'));
+
+      // ============== Finale ==============
+      at(33800, () => {{
+        document.getElementById('cinemaFinale').classList.add('show');
+        setStatus(0, '<span class="act" style="background:rgba(74,222,128,0.12);color:#4ade80;">listo</span>todo bajo nuestro stack');
+      }});
+
+      // ============== Loop ==============
+      at(38500, () => {{
+        if (visible) {{
+          runStory();
+        }} else {{
+          const waitId = setInterval(() => {{
+            if (visible) {{ clearInterval(waitId); runStory(); }}
+          }}, 800);
+          intervals.push(waitId);
+        }}
+      }});
+    }}
+
+    let visible = true;
+    let started = false;
+    new IntersectionObserver((entries) => {{
+      entries.forEach(e => {{
+        visible = e.isIntersecting;
+        if (visible && !started && !reduced) {{
+          started = true;
+          runStory();
+        }}
+      }});
+    }}, {{ threshold: 0.2 }}).observe(stage);
+
+    // Si la stage ya está dentro del viewport en page load (caso típico de
+    // /diagram donde la stage es lo único que se ve), arrancamos sin esperar
+    // al observer — éste suele dispararse pero por seguridad metemos un
+    // fallback con un pequeño retraso.
+    setTimeout(() => {{
+      if (!started && !reduced) {{
+        started = true;
+        runStory();
+      }}
+    }}, 400);
+
+    if (reduced) {{
+      setMeta('+34 600 549 832', true);
+      ['modBackend','modKannel','modAsterisk','modNumbers','modSip'].forEach(id => {{
+        document.getElementById(id).classList.add('active');
+      }});
+      setStatus(0, 'todo el stack activo · animación deshabilitada por preferencia del sistema');
+    }}
+
+    document.getElementById('cinemaReplayBtn').addEventListener('click', () => {{
+      if (reduced) return;
+      runStory();
+    }});
+  }})();
+</script>
+
+</body>
+</html>"""
+
+
 def render_llms_txt():
     """Formato emergente https://llmstxt.org — índice corto en markdown para LLMs."""
     tool_lines = "\n".join(f"- {n}: {d}" for n, d in _tools_for_landing())
@@ -4769,6 +5504,8 @@ class Handler(BaseHTTPRequestHandler):
             return respond_html(self, 200, render_partnership_page())
         if p == "/experience":
             return respond_html(self, 200, render_experience_page())
+        if p == "/diagram":
+            return respond_html(self, 200, render_diagram_page())
         m = re.match(r"^/v1/(sim-requests|offers|customers|contracts|mobile-identities)/([^/]+)$", p)
         if m:
             table = m.group(1).replace("-", "_")
