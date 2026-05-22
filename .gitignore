@@ -29,6 +29,13 @@ demo_output.txt
 .env
 .env.local
 
+# SQLite runtime DB (persistencia del STATE)
+ami_state.db
+ami_state.db-shm
+ami_state.db-wal
+*.sqlite
+*.sqlite3
+
 # Claude
 .claude/settings.local.json
 

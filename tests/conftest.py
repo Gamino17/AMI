@@ -40,6 +40,9 @@ def ami_api_module():
     """Import ami_api with the test API key set so module-level constants pick it up."""
     os.environ["AMI_API_KEY"] = TEST_API_KEY
     os.environ.setdefault("AMI_PUBLIC_URL", "http://127.0.0.1")
+    # Tests no deben persistir state a disk entre runs — usamos :memory: para
+    # que ami_storage queda en modo no-op.
+    os.environ["AMI_DB_PATH"] = ":memory:"
 
     if "ami_api" in sys.modules:
         module = importlib.reload(sys.modules["ami_api"])

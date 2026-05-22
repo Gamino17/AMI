@@ -157,6 +157,13 @@ def _deliver_with_retries(wh_id: str, url: str, secret: str, body: bytes) -> Non
             time.sleep(RETRY_DELAYS_S[attempts])
         attempts += 1
 
+    # Métrica del intento (counter por result: ok | failed)
+    try:
+        import ami_metrics
+        ami_metrics.WEBHOOKS_DELIVERED.inc(result="ok" if ok else "failed")
+    except ImportError:
+        pass
+
     # Actualiza el record del webhook
     wh = STATE["webhooks"].get(wh_id)
     if not wh:

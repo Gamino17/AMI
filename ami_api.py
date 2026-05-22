@@ -14,6 +14,9 @@ from ami_telco import get_active_adapter
 import ami_webhooks
 import ami_limits
 import ami_panel
+import ami_storage
+import ami_metrics
+import ami_pages_en
 
 STATE = {
     "sim_requests": {},
@@ -32,6 +35,12 @@ STATE = {
     # Webhooks salientes scoped por MID. wh_id -> webhook record.
     "webhooks": {},
 }
+
+# Carga del STATE persistido (SQLite). Si AMI_DB_PATH no existe, arranca en
+# blanco. Si AMI_DB_PATH=:memory: (modo dev/tests), no persiste nada.
+# Se hace en el primer import del módulo. Las claves nuevas (introducidas en
+# versiones posteriores) heredan el default vacío de arriba si no están en DB.
+ami_storage.load_state(STATE)
 
 COUNTRIES = {
     "ES": {
@@ -62,7 +71,7 @@ TERMINAL = {"active", "cancelled", "rejected", "failed"}
 API_KEY = os.environ.get("AMI_API_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/panel", "/panel/login")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/panel", "/panel/login", "/metrics")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout")
 PUBLIC_POST_REGEX = re.compile(r"^/v1/sign/[^/]+/confirm$")
@@ -154,6 +163,28 @@ LANG_AUGMENT_CSS = """
   .ami-lang-banner a { color: #5dd1ff; text-decoration: underline; }
   .ami-lang-banner a:hover { color: #b9e6ff; }
 """
+
+def _path_template(raw_path: str) -> str:
+    """Normaliza la URL para métricas: sustituye IDs por placeholders {id}
+    para evitar cardinalidad infinita en Prometheus. Quita query string."""
+    p = (raw_path.split("?", 1)[0] or "/")
+    # Reemplaza segmentos que parecen IDs (prefijos conocidos o hex >=8 chars)
+    out = []
+    for seg in p.split("/"):
+        if not seg:
+            out.append(seg); continue
+        # IDs con prefijo conocido: simreq_xxx, offer_xxx, mid_xxx, msg_xxx, etc.
+        if "_" in seg and any(seg.startswith(pfx) for pfx in
+                               ("simreq_", "offer_", "cust_", "contract_",
+                                "mid_", "msg_", "call_", "wh_", "evt_")):
+            out.append("{id}")
+        # Tokens de firma de contrato (URL-friendly hex)
+        elif re.fullmatch(r"[0-9a-f]{12,}", seg):
+            out.append("{id}")
+        else:
+            out.append(seg)
+    return "/".join(out) or "/"
+
 
 def _detect_lang(handler) -> str:
     """Decide qué idioma servir para una página dada. Orden de preferencia:
@@ -406,6 +437,7 @@ def send_sms_outbound(mid, to_raw, body):
     STATE["sms_messages"][msg["id"]] = msg
     event("sms_queued", "sms_message", msg["id"],
           {"mid": mid, "to": to, "len": len(body)})
+    ami_metrics.SMS_SENT.inc(status="queued")
 
     # Delegar el envío al telco. En mock simula DLR con Timers; en live habla
     # a Kannel y los cambios de estado llegan vía webhook /v1/_telco/sms/dlr.
@@ -521,7 +553,9 @@ def transition_call(call, new_status, **patch):
         if v is not None:
             call[k] = v
     event(f"call_{new_status}", "call", call["id"], {"from": cur, "to": new_status, **patch})
-    # Contabilidad y webhook saliente al cliente.
+    # Contabilidad + métrica del estado terminal + webhook saliente.
+    if new_status in CALL_TERMINAL:
+        ami_metrics.CALLS_PLACED.inc(status=new_status)
     if new_status == "completed":
         identity = STATE["mobile_identities"].get(call.get("mid"))
         if identity:
@@ -567,6 +601,7 @@ def place_call_outbound(mid, to_raw, callback_sip_uri):
     STATE["calls"][call["id"]] = call
     event("call_placed", "call", call["id"],
           {"mid": mid, "to": to, "callback_sip_uri": call["callback_sip_uri"]})
+    ami_metrics.CALLS_PLACED.inc(status="initiated")
 
     # Delegar la llamada al telco. En mock simula ringing/answer/hangup con
     # Timers; en live pide Originate a Asterisk vía ARI y las transiciones
@@ -680,6 +715,7 @@ def transition_sim_request(req, new_status, reason=None):
 
 
 def response(handler, status, payload):
+    handler._last_status = status
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode()
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -692,6 +728,7 @@ def response(handler, status, payload):
 
 
 def respond_html(handler, status, html):
+    handler._last_status = status
     body = html.encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -701,6 +738,7 @@ def respond_html(handler, status, html):
 
 
 def respond_text(handler, status, text, content_type="text/plain; charset=utf-8"):
+    handler._last_status = status
     body = text.encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
@@ -6073,6 +6111,38 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("AMI", self.address_string(), fmt % args)
 
+    def handle_one_request(self):
+        """Wrap del request para persistir STATE + grabar métricas.
+
+        - ami_storage.save_state() escribe el snapshot a SQLite al final del
+          ciclo (cuando ami_api.STATE pudo haber mutado).
+        - ami_metrics.REQUESTS y LATENCY se incrementan con method+path+status
+          + tiempo wall-clock. Path se normaliza a template (sin IDs) para
+          evitar cardinalidad infinita.
+        """
+        import time
+        t0 = time.monotonic()
+        try:
+            super().handle_one_request()
+        finally:
+            elapsed = time.monotonic() - t0
+            try:
+                method = (self.command or "?").upper()
+                path_template = _path_template(getattr(self, "path", "") or "")
+                status = str(getattr(self, "_last_status", 0) or 0)
+                ami_metrics.REQUESTS.inc(method=method, path=path_template, status=status)
+                ami_metrics.LATENCY.observe(elapsed, method=method, path=path_template)
+                # Gauge ligero: nº de MIDs activos (cardinalidad O(1))
+                active = sum(1 for m in STATE["mobile_identities"].values()
+                              if m.get("status") == "active")
+                ami_metrics.ACTIVE_MIDS.set(active)
+            except Exception:
+                pass
+            try:
+                ami_storage.save_state(STATE)
+            except Exception:
+                pass  # no rompemos el ciclo HTTP por un fallo de disco
+
     def do_OPTIONS(self): response(self, 200, {"ok": True})
 
     # ------------------------------------------------------------------ GET
@@ -6170,6 +6240,10 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "service": "ami", "time": now(),
                 "telco": get_active_adapter().health(),
             })
+        if p == "/metrics":
+            # Endpoint de scrape Prometheus. Público por convención (no expone PII).
+            return respond_text(self, 200, ami_metrics.REGISTRY.render(),
+                                content_type=ami_metrics.CONTENT_TYPE)
         if p == "/v1/sim-options":
             return response(self, 200, {"countries": COUNTRIES})
         if p == "/v1/events":
@@ -6201,11 +6275,15 @@ class Handler(BaseHTTPRequestHandler):
             return respond_html(self, 200, _with_lang_augment(
                 render_partnership_page(lang=lang), lang=lang, has_en_content=True))
         if p == "/experience":
+            html = (ami_pages_en.render_experience_page_en() if lang == "en"
+                    else render_experience_page())
             return respond_html(self, 200, _with_lang_augment(
-                render_experience_page(), lang=lang, has_en_content=False))
+                html, lang=lang, has_en_content=True))
         if p == "/diagram":
+            html = (ami_pages_en.render_diagram_page_en() if lang == "en"
+                    else render_diagram_page())
             return respond_html(self, 200, _with_lang_augment(
-                render_diagram_page(), lang=lang, has_en_content=False))
+                html, lang=lang, has_en_content=True))
 
         # Panel del cliente: auth por cookie ami-panel-token (httpOnly, sólo
         # validable comparando contra AMI_API_KEY).
@@ -6299,6 +6377,7 @@ class Handler(BaseHTTPRequestHandler):
                 msg["delivered_at"] = now()
                 if telco_ref: msg["telco_ref"] = telco_ref
                 event("sms_delivered", "sms_message", msg_id, {})
+                ami_metrics.SMS_SENT.inc(status="delivered")
                 ami_webhooks.dispatch_event("sms.delivered", msg["mid"], msg)
                 return response(self, 200, msg)
             if status_raw in ("failed", "rejected", "expired", "2", "4", "8", "16"):
@@ -6307,6 +6386,7 @@ class Handler(BaseHTTPRequestHandler):
                     if telco_ref: msg["telco_ref"] = telco_ref
                     event("sms_failed", "sms_message", msg_id,
                           {"reason": status_raw, "telco_ref": telco_ref})
+                    ami_metrics.SMS_SENT.inc(status="failed")
                     ami_webhooks.dispatch_event("sms.failed", msg["mid"], msg)
                 return response(self, 200, msg)
             return response(self, 400, {"error": "unknown_status", "status": status_raw})
