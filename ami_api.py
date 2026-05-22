@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 import hashlib, json, os, re, secrets, uuid
 
+from ami_telco import get_active_adapter
+
 STATE = {
     "sim_requests": {},
     "offers": {},
@@ -237,31 +239,11 @@ def send_sms_outbound(mid, to_raw, body):
     event("sms_queued", "sms_message", msg["id"],
           {"mid": mid, "to": to, "len": len(body)})
 
-    # DLR simulado: queued → sent → delivered con retraso corto.
-    # Solo en in-memory v1. Cuando llegue SMSC real (Kannel), estos cambios de
-    # estado vienen como SUBMIT_SM_RESP y DELIVER_SM_RESP del partner.
-    _schedule_dlr_transitions(msg["id"])
+    # Delegar el envío al telco. En mock simula DLR con Timers; en live habla
+    # a Kannel y los cambios de estado llegan vía webhook /v1/_telco/sms/dlr.
+    get_active_adapter().send_sms(msg)
 
     return 201, msg
-
-
-def _schedule_dlr_transitions(msg_id):
-    """Programa transiciones de estado simuladas en un Timer daemon."""
-    import threading
-    def to_sent():
-        m = STATE["sms_messages"].get(msg_id)
-        if m and m["status"] == "queued":
-            m["status"] = "sent"
-            m["telco_ref"] = "mock:" + secrets.token_hex(6)
-            event("sms_sent", "sms_message", msg_id, {"telco_ref": m["telco_ref"]})
-    def to_delivered():
-        m = STATE["sms_messages"].get(msg_id)
-        if m and m["status"] == "sent":
-            m["status"] = "delivered"
-            m["delivered_at"] = now()
-            event("sms_delivered", "sms_message", msg_id, {})
-    threading.Timer(0.15, to_sent).start()
-    threading.Timer(0.45, to_delivered).start()
 
 
 def record_sms_inbound(from_raw, to_raw, body, telco_ref=None):
@@ -311,10 +293,11 @@ TELCO_INBOUND_KEY = os.environ.get("AMI_TELCO_INBOUND_KEY") or None
 
 
 # ----- Operations v2 · Voz (bridge-by-API) -------------------------------
-# AMI es el operador / SIP provider. NO ejecuta Realtime ni hace media bridge:
-# el "cerebro" del audio vive en el endpoint SIP del cliente (típicamente
-# sip:<project>@sip.api.openai.com;transport=tls). AMI sólo origina la
-# llamada al PSTN y la bridgea SIP-to-SIP hacia ese destino.
+# AMI es el operador / SIP provider. NO ejecuta voz ni hace media bridge:
+# el "cerebro" del audio vive en el endpoint SIP del cliente (un motor de
+# voz en tiempo real, un PBX propio, o cualquier destino que hable SIP).
+# AMI sólo origina la llamada al PSTN y la bridgea SIP-to-SIP hacia ese
+# destino.
 #
 # Schema de call record:
 #   id: call_xxx
@@ -402,34 +385,11 @@ def place_call_outbound(mid, to_raw, callback_sip_uri):
     event("call_placed", "call", call["id"],
           {"mid": mid, "to": to, "callback_sip_uri": call["callback_sip_uri"]})
 
-    # Lifecycle simulado: initiated → ringing → in_progress → completed.
-    # En producción estas transiciones las dispara el partner telco / Asterisk
-    # vía /v1/_telco/calls/{id}/status. Aquí simulamos para v1.
-    _schedule_call_lifecycle(call["id"])
+    # Delegar la llamada al telco. En mock simula ringing/answer/hangup con
+    # Timers; en live pide Originate a Asterisk vía ARI y las transiciones
+    # llegan por /v1/_telco/calls/{id}/status.
+    get_active_adapter().place_call(call)
     return 201, call
-
-
-def _schedule_call_lifecycle(call_id):
-    """Simula el ciclo de vida con threading.Timer (solo en in-memory v1)."""
-    import threading
-    def to_ringing():
-        c = STATE["calls"].get(call_id)
-        if c and c["status"] == "initiated":
-            try: transition_call(c, "ringing", telco_ref="mock:" + secrets.token_hex(6))
-            except ValueError: pass
-    def to_in_progress():
-        c = STATE["calls"].get(call_id)
-        if c and c["status"] == "ringing":
-            try: transition_call(c, "in_progress")
-            except ValueError: pass
-    def to_completed():
-        c = STATE["calls"].get(call_id)
-        if c and c["status"] == "in_progress":
-            try: transition_call(c, "completed", hangup_cause="normal_clearing")
-            except ValueError: pass
-    threading.Timer(0.15, to_ringing).start()
-    threading.Timer(0.40, to_in_progress).start()
-    threading.Timer(0.90, to_completed).start()
 
 
 def hangup_call(mid, call_id):
@@ -445,6 +405,8 @@ def hangup_call(mid, call_id):
         transition_call(call, target, hangup_cause="hangup_by_agent")
     except ValueError as e:
         return 409, {"error": str(e)}
+    # Pide al telco que cuelgue (en mock no hace red; en live manda DELETE a ARI).
+    get_active_adapter().hangup_call(call)
     return 200, call
 
 
@@ -1357,7 +1319,7 @@ def _tools_for_landing():
         ("ami.send_sms",                "Envía un SMS desde la MobileIdentity activa (auth: agent_token Nivel 2)."),
         ("ami.list_sms",                "Lista los SMS de la MobileIdentity (filtrable por dirección)."),
         # --- Operations v2 · Voz (bridge-by-API) ---
-        ("ami.place_call",              "Origina una llamada saliente y la bridgea por SIP al endpoint del cliente (Realtime de OpenAI o PBX propio)."),
+        ("ami.place_call",              "Origina una llamada saliente y la bridgea por SIP al endpoint del cliente (motor de voz, PBX o cualquier destino SIP)."),
         ("ami.list_calls",              "Lista las llamadas del MID (filtrable por dirección)."),
         ("ami.get_call",                "Detalle de una llamada (scoped al MID)."),
         ("ami.hangup_call",             "Termina una llamada en curso del MID."),
@@ -5721,9 +5683,9 @@ AMI expone un MCP server y una REST API JSON. El agente recorre dos planos:
    `agent_token` scoped al MID (Nivel 2 de auth) que se usa después.
 2. **Operación (continuo):** con el `agent_token`, el agente envía/recibe SMS
    y origina/recibe llamadas. La voz funciona en **bridge-by-API**: AMI cursa
-   la llamada al PSTN y la bridgea por SIP al endpoint del cliente
-   (típicamente su URI Realtime, p.ej. `sip:<proj>@sip.api.openai.com`). AMI
-   NO ejecuta voz — es el operador / SIP provider, no el cerebro.
+   la llamada al PSTN y la bridgea por SIP al endpoint del cliente (su URI
+   SIP de Realtime, PBX propio, o cualquier destino que hable SIP). AMI NO
+   ejecuta voz — es el operador / SIP provider, no el cerebro.
 
 Lo único simulado en v1 es la pieza telco (SIM/SMSC/PBX). El resto —
 contratos, firma, máquina de estados, audit, scoped tokens, lifecycle de SMS
@@ -5954,7 +5916,10 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/favicon.ico":
             return respond_text(self, 204, "", content_type="image/x-icon")
         if p == "/v1/health":
-            return response(self, 200, {"ok": True, "service": "ami-mock", "time": now()})
+            return response(self, 200, {
+                "ok": True, "service": "ami", "time": now(),
+                "telco": get_active_adapter().health(),
+            })
         if p == "/v1/sim-options":
             return response(self, 200, {"countries": COUNTRIES})
         if p == "/v1/events":
@@ -6005,6 +5970,42 @@ class Handler(BaseHTTPRequestHandler):
                 return response(self, 400, {"error": "invalid_json", "detail": str(e)})
             code, body = send_sms_outbound(rec["mid"], data.get("to"), data.get("body", ""))
             return response(self, code, body)
+
+        # DLR del SMSC: Kannel (u otro) reporta el estado final del SMS saliente.
+        # Body esperado (form-encoded por Kannel o JSON): {msg_id, status, telco_ref}
+        # donde status ∈ {"delivered","failed"}. Permite también query string
+        # (?msg_id=...&status=...) para compatibilidad con sustituciones de Kannel.
+        if p == "/v1/_telco/sms/dlr":
+            if not TELCO_INBOUND_KEY:
+                return response(self, 503, {"error": "telco_inbound_disabled"})
+            if self.headers.get("X-Telco-Key", "") != TELCO_INBOUND_KEY:
+                return response(self, 401, {"error": "invalid_telco_key"})
+            # Acepta JSON body o form/query (Kannel usa GET-via-POST con query).
+            qs = dict(re.findall(r"([^&=?]+)=([^&]*)", urlparse(self.path).query or ""))
+            try: data = read_json(self)
+            except Exception: data = {}
+            msg_id = data.get("msg_id") or qs.get("msg_id")
+            status_raw = (data.get("status") or qs.get("status") or "").lower()
+            telco_ref = data.get("telco_ref") or qs.get("telco_ref")
+            if not msg_id:
+                return response(self, 400, {"error": "missing_msg_id"})
+            msg = STATE["sms_messages"].get(msg_id)
+            if not msg:
+                return response(self, 404, {"error": "sms_not_found"})
+            if status_raw in ("delivered", "1", "ok"):
+                msg["status"] = "delivered"
+                msg["delivered_at"] = now()
+                if telco_ref: msg["telco_ref"] = telco_ref
+                event("sms_delivered", "sms_message", msg_id, {})
+                return response(self, 200, msg)
+            if status_raw in ("failed", "rejected", "expired", "2", "4", "8", "16"):
+                if msg["status"] in ("queued", "sent"):
+                    msg["status"] = "failed"
+                    if telco_ref: msg["telco_ref"] = telco_ref
+                    event("sms_failed", "sms_message", msg_id,
+                          {"reason": status_raw, "telco_ref": telco_ref})
+                return response(self, 200, msg)
+            return response(self, 400, {"error": "unknown_status", "status": status_raw})
 
         # Webhook del partner telco para entregar un SMS entrante hacia un MID nuestro.
         # Auth por clave compartida en header X-Telco-Key (env AMI_TELCO_INBOUND_KEY).
@@ -6255,8 +6256,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # Configurar el endpoint SIP de entrantes para un MID. Auth: API key del
         # customer (Nivel 1). El partner usa este URI para hacer SIP-forward de
-        # las llamadas entrantes hacia el destino del cliente (típicamente su
-        # endpoint Realtime de OpenAI).
+        # las llamadas entrantes hacia el destino del cliente (su motor de voz,
+        # PBX propio, o cualquier destino que hable SIP).
         m = re.match(r"^/v1/mobile-identities/([^/]+)/inbound-config$", p)
         if m:
             mid = m.group(1)

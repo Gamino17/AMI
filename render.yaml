@@ -21,6 +21,44 @@ services:
       # primer deploy.
       - key: AMI_PUBLIC_URL
         sync: false
+      # === Operations v2 · auth de los webhooks /v1/_telco/* ===
+      # Generar con `openssl rand -hex 32`. Mismo valor que se configura en
+      # Kannel y Asterisk en infra/.env. Si no se setea, los endpoints /v1/_telco/*
+      # devuelven 503 (modo "Operations v2 deshabilitado"), que es lo correcto
+      # mientras no hay partner conectado.
+      - key: AMI_TELCO_INBOUND_KEY
+        sync: false
+      # === Modo telco ===
+      # mock (default) = simula DLR y lifecycle con Timers en memoria. Útil para
+      # dev y para mostrar el protocolo sin partner conectado.
+      # live = habla a Kannel (SMS) y Asterisk ARI (voz). Activar cuando el partner
+      # entregue trunk SMPP + SIP y los servicios de infra/docker-compose estén
+      # desplegados en una VM aparte (Render no es buen sitio para Kannel/Asterisk;
+      # se despliegan en un VPS con IP pública estable que el partner pueda whitelistear).
+      - key: AMI_TELCO_MODE
+        value: mock
+      # === Kannel (cuando AMI_TELCO_MODE=live) ===
+      # URL pública del Kannel sendsms gateway (Render NO, VPS sí). Tras desplegar
+      # el stack infra/, apuntar a https://kannel.tuvps.example/cgi-bin/sendsms.
+      - key: AMI_KANNEL_SENDSMS_URL
+        sync: false
+      - key: AMI_KANNEL_USERNAME
+        sync: false
+      - key: AMI_KANNEL_PASSWORD
+        sync: false
+      # URL pública absoluta del webhook DLR del propio AMI (Render). P.ej.
+      # https://api.protocolami.com/v1/_telco/sms/dlr.
+      - key: AMI_KANNEL_DLR_URL
+        sync: false
+      # === Asterisk ARI (cuando AMI_TELCO_MODE=live) ===
+      - key: AMI_ARI_URL
+        sync: false
+      - key: AMI_ARI_USERNAME
+        sync: false
+      - key: AMI_ARI_PASSWORD
+        sync: false
+      - key: AMI_ARI_TRUNK
+        value: PJSIP/trunk_partner
 
   # ----------------------------------------------------------------------------
   # AMI MCP server vía HTTP streamable. Permite que cualquier agente conecte

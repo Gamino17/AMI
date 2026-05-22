@@ -80,6 +80,9 @@ def reset_state(ami_api_module):
     state.get("agent_tokens", {}).clear()
     state.get("sms_messages", {}).clear()
     state.get("calls", {}).clear()
+    # Reset del telco adapter para que los tests no compartan estado entre sí.
+    import ami_telco
+    ami_telco.reset_active_adapter()
     yield
 
 

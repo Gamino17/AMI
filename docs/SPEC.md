@@ -177,9 +177,9 @@ Auth: `agent_token` scoped al MID (Nivel 2).
 
 **Voz (bridge-by-API):**
 - `ami.place_call(to, callback_sip_uri)` — origina la llamada al PSTN y la
-  bridgea por SIP al endpoint del cliente (típicamente
-  `sip:<project>@sip.api.openai.com;transport=tls`). AMI cursa la pipa; el
-  "cerebro" de la voz vive en el endpoint del cliente.
+  bridgea por SIP al endpoint del cliente (su URI SIP de motor de voz en
+  tiempo real, PBX propio, o cualquier destino que hable SIP). AMI cursa la
+  pipa; el "cerebro" de la voz vive en el endpoint del cliente.
 - `ami.list_calls(limit, direction)`, `ami.get_call(call_id)`
 - `ami.hangup_call(call_id)`
 - `ami.set_inbound_sip_uri(mid, sip_uri)` — auth Nivel 1; configura a dónde

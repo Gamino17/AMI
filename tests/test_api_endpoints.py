@@ -154,5 +154,6 @@ def test_health_endpoint_payload_shape(anon_client):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    assert body["service"] == "ami-mock"
+    assert body["service"] == "ami"
     assert "time" in body
+    assert body["telco"]["adapter"] in ("mock", "live")

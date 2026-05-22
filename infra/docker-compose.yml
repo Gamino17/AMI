@@ -1,0 +1,114 @@
+# AMI · stack telco para producción
+#
+# Tres servicios:
+#   - ami_api: el backend AMI v1 + Operations v2 (Python stdlib, sin deps).
+#   - kannel:   SMSC HTTP gateway. Habla SMPP con el partner por su lado, y
+#               HTTP con ami_api por el nuestro.
+#   - asterisk: PBX/SIP. Termina/origina llamadas vía trunk PJSIP del partner
+#               y las bridgea por SIP al endpoint del cliente. Expone ARI a
+#               ami_api para Originate y recibe el hangup vía DELETE /channels.
+#
+# Para arrancar:
+#   cp .env.example .env
+#   # rellena las credenciales que el partner te entregue
+#   docker compose up -d
+#
+# Para volver a modo mock (sin telco real):
+#   AMI_TELCO_MODE=mock docker compose up ami_api
+#
+version: "3.9"
+
+services:
+  ami_api:
+    build:
+      context: ..
+      dockerfile: infra/ami_api.Dockerfile
+    container_name: ami_api
+    restart: unless-stopped
+    environment:
+      AMI_API_KEY: ${AMI_API_KEY}
+      AMI_PUBLIC_URL: ${AMI_PUBLIC_URL:-http://localhost:8000}
+      AMI_REPO_URL: ${AMI_REPO_URL:-https://github.com/Gamino17/AMI}
+      AMI_MCP_HTTP_URL: ${AMI_MCP_HTTP_URL:-http://localhost:8001/mcp/}
+      # === MODO LIVE: habla a kannel + asterisk en lugar de simular con Timers ===
+      AMI_TELCO_MODE: ${AMI_TELCO_MODE:-live}
+      AMI_TELCO_INBOUND_KEY: ${AMI_TELCO_INBOUND_KEY}
+      # Kannel (red interna del compose)
+      AMI_KANNEL_SENDSMS_URL: "http://kannel:13013/cgi-bin/sendsms"
+      AMI_KANNEL_USERNAME: ${KANNEL_SENDSMS_USER}
+      AMI_KANNEL_PASSWORD: ${KANNEL_SENDSMS_PASSWORD}
+      AMI_KANNEL_DLR_URL: "${AMI_PUBLIC_URL}/v1/_telco/sms/dlr"
+      # Asterisk ARI (red interna del compose)
+      AMI_ARI_URL: "http://asterisk:8088/ari"
+      AMI_ARI_USERNAME: ${ARI_USERNAME}
+      AMI_ARI_PASSWORD: ${ARI_PASSWORD}
+      AMI_ARI_TRUNK: "PJSIP/trunk_partner"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - kannel
+      - asterisk
+    networks: [ami_net]
+
+  kannel:
+    # Kannel oficial; si tu partner pide una versión concreta, fijar tag aquí.
+    image: kannel/kannel:1.4.5
+    container_name: kannel
+    restart: unless-stopped
+    volumes:
+      - ./kannel/kannel.conf:/etc/kannel/kannel.conf:ro
+      - ./kannel/sms-services.conf:/etc/kannel/sms-services.conf:ro
+      - kannel_spool:/var/spool/kannel
+    environment:
+      # Estas envs las consume el plantillado de kannel.conf si tu imagen
+      # soporta envsubst; si no, edita kannel.conf directamente.
+      SMPP_HOST: ${SMPP_HOST}
+      SMPP_PORT: ${SMPP_PORT}
+      SMPP_SYSTEM_ID: ${SMPP_SYSTEM_ID}
+      SMPP_PASSWORD: ${SMPP_PASSWORD}
+      SMPP_SYSTEM_TYPE: ${SMPP_SYSTEM_TYPE:-}
+      SMPP_SOURCE_TON: ${SMPP_SOURCE_TON:-1}
+      SMPP_SOURCE_NPI: ${SMPP_SOURCE_NPI:-1}
+      KANNEL_SENDSMS_USER: ${KANNEL_SENDSMS_USER}
+      KANNEL_SENDSMS_PASSWORD: ${KANNEL_SENDSMS_PASSWORD}
+      AMI_PUBLIC_URL: ${AMI_PUBLIC_URL}
+      AMI_TELCO_INBOUND_KEY: ${AMI_TELCO_INBOUND_KEY}
+    ports:
+      - "13000:13000"   # admin
+      - "13013:13013"   # sendsms HTTP
+    networks: [ami_net]
+
+  asterisk:
+    # Asterisk 20 LTS. Si el partner requiere otra versión por compatibilidad
+    # con su trunk, ajusta el tag aquí.
+    image: andrius/asterisk:20.5.2
+    container_name: asterisk
+    restart: unless-stopped
+    volumes:
+      - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./asterisk/ari.conf:/etc/asterisk/ari.conf:ro
+      - ./asterisk/http.conf:/etc/asterisk/http.conf:ro
+      - ./asterisk/scripts:/var/lib/asterisk/scripts:ro
+    environment:
+      SIP_TRUNK_HOST: ${SIP_TRUNK_HOST}
+      SIP_TRUNK_PORT: ${SIP_TRUNK_PORT:-5060}
+      SIP_TRUNK_USERNAME: ${SIP_TRUNK_USERNAME}
+      SIP_TRUNK_PASSWORD: ${SIP_TRUNK_PASSWORD}
+      ARI_USERNAME: ${ARI_USERNAME}
+      ARI_PASSWORD: ${ARI_PASSWORD}
+      AMI_PUBLIC_URL: ${AMI_PUBLIC_URL}
+      AMI_TELCO_INBOUND_KEY: ${AMI_TELCO_INBOUND_KEY}
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "10000-10100:10000-10100/udp"  # RTP
+      - "8088:8088"                     # ARI / Stasis
+    networks: [ami_net]
+
+networks:
+  ami_net:
+    driver: bridge
+
+volumes:
+  kannel_spool:
