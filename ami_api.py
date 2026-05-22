@@ -490,6 +490,87 @@ def _find_mid_by_phone(phone_norm):
     return None, None
 
 
+# Política de retries del envío al telco. Si el adapter (Kannel o mock) deja
+# el SMS en `failed` antes de llegar a `sent`, reintentamos automáticamente
+# con backoff. Esto cubre fallos transitorios de red, 5xx temporales del
+# SMSC, throttling momentáneo, etc. Tras `SMS_MAX_RETRIES` fallos consecutivos
+# el SMS queda como `failed` definitivo.
+SMS_MAX_RETRIES = 3
+SMS_RETRY_BACKOFF_S = (2.0, 8.0, 30.0)
+CALL_MAX_RETRIES = 2
+CALL_RETRY_BACKOFF_S = (3.0, 15.0)
+
+
+def _schedule_sms_retry(msg_id):
+    """Programa un Timer que, si tras el delay el SMS sigue failed,
+    lo reintenta con el adapter."""
+    import threading
+    msg = STATE["sms_messages"].get(msg_id)
+    if not msg: return
+    attempt = msg.get("retry_count", 0)
+    if attempt >= SMS_MAX_RETRIES:
+        ami_metrics.log_error("sms_retries_exhausted", msg_id=msg_id,
+                               mid=msg.get("mid"), attempts=attempt)
+        return
+    delay = SMS_RETRY_BACKOFF_S[min(attempt, len(SMS_RETRY_BACKOFF_S) - 1)]
+    def attempt_retry():
+        m = STATE["sms_messages"].get(msg_id)
+        if not m or m["status"] not in ("failed",):
+            return  # ya progresó (sent/delivered) o lo borraron
+        m["retry_count"] = attempt + 1
+        m["status"] = "queued"
+        event("sms_retry", "sms_message", msg_id,
+              {"attempt": attempt + 1, "mid": m.get("mid")})
+        ami_metrics.log_info("sms_retry", msg_id=msg_id, mid=m.get("mid"),
+                              attempt=attempt + 1)
+        try:
+            get_active_adapter().send_sms(m)
+        except Exception as e:
+            m["status"] = "failed"
+            ami_metrics.log_error("sms_retry_error", msg_id=msg_id, error=str(e))
+        # Si tras este intento sigue failed, encolar otro retry
+        threading.Timer(0.5, lambda: _schedule_sms_retry(msg_id)).start()
+    threading.Timer(delay, attempt_retry).start()
+
+
+def _schedule_call_retry(call_id):
+    """Análogo a _schedule_sms_retry para llamadas que fallan antes de
+    entrar en in_progress."""
+    import threading
+    call = STATE["calls"].get(call_id)
+    if not call: return
+    attempt = call.get("retry_count", 0)
+    if attempt >= CALL_MAX_RETRIES:
+        ami_metrics.log_error("call_retries_exhausted", call_id=call_id,
+                               mid=call.get("mid"), attempts=attempt)
+        return
+    # Solo reintentamos si el fallo ocurrió antes de answer (failed o no_answer
+    # antes de in_progress). Una llamada que llegó a in_progress y luego falló
+    # NO debe reintentarse sin acción humana — la conversación ya empezó.
+    if call.get("started_at"):
+        return
+    delay = CALL_RETRY_BACKOFF_S[min(attempt, len(CALL_RETRY_BACKOFF_S) - 1)]
+    def attempt_retry():
+        c = STATE["calls"].get(call_id)
+        if not c or c["status"] not in ("failed", "no_answer"):
+            return
+        c["retry_count"] = attempt + 1
+        # Resetear estado a initiated y volver a originar
+        c["status"] = "initiated"
+        c["ended_at"] = None
+        c["hangup_cause"] = None
+        event("call_retry", "call", call_id,
+              {"attempt": attempt + 1, "mid": c.get("mid")})
+        ami_metrics.log_info("call_retry", call_id=call_id, mid=c.get("mid"),
+                              attempt=attempt + 1)
+        try:
+            get_active_adapter().place_call(c)
+        except Exception as e:
+            c["status"] = "failed"
+            ami_metrics.log_error("call_retry_error", call_id=call_id, error=str(e))
+    threading.Timer(delay, attempt_retry).start()
+
+
 def send_sms_outbound(mid, to_raw, body):
     """Encola un SMS saliente desde el MID. Devuelve (status_code, payload).
 
@@ -511,6 +592,7 @@ def send_sms_outbound(mid, to_raw, body):
     ok, reason = ami_limits.check_and_charge_sms(identity, to)
     if not ok:
         event("sms_blocked", "mobile_identity", mid, {"reason": reason, "to": to})
+        ami_metrics.log_warn("sms_blocked", mid=mid, reason=reason, to=to)
         return 429, {"error": reason, "mid": mid}
 
     msg = {
@@ -529,6 +611,8 @@ def send_sms_outbound(mid, to_raw, body):
     event("sms_queued", "sms_message", msg["id"],
           {"mid": mid, "to": to, "len": len(body)})
     ami_metrics.SMS_SENT.inc(status="queued")
+    ami_metrics.log_info("sms_queued", msg_id=msg["id"], mid=mid, to=to,
+                          len=len(body), account_id=identity.get("account_id"))
 
     # Delegar el envío al telco. En mock simula DLR con Timers; en live habla
     # a Kannel y los cambios de estado llegan vía webhook /v1/_telco/sms/dlr.
@@ -654,6 +738,12 @@ def transition_call(call, new_status, **patch):
         ami_webhooks.dispatch_event("call.completed", call["mid"], call)
     elif new_status in ("failed", "no_answer", "busy", "cancelled"):
         ami_webhooks.dispatch_event("call.failed", call["mid"], call)
+        # Retry automático para fallos pre-answer (no para busy/cancelled —
+        # esos son señales legítimas que NO se reintentan).
+        if (new_status in ("failed", "no_answer")
+                and not call.get("started_at")
+                and call.get("retry_count", 0) < CALL_MAX_RETRIES):
+            _schedule_call_retry(call["id"])
 
 
 def place_call_outbound(mid, to_raw, callback_sip_uri):
@@ -672,6 +762,7 @@ def place_call_outbound(mid, to_raw, callback_sip_uri):
     ok, reason = ami_limits.check_and_reserve_call(identity, to)
     if not ok:
         event("call_blocked", "mobile_identity", mid, {"reason": reason, "to": to})
+        ami_metrics.log_warn("call_blocked", mid=mid, reason=reason, to=to)
         return 429, {"error": reason, "mid": mid}
 
     call = {
@@ -693,6 +784,8 @@ def place_call_outbound(mid, to_raw, callback_sip_uri):
     event("call_placed", "call", call["id"],
           {"mid": mid, "to": to, "callback_sip_uri": call["callback_sip_uri"]})
     ami_metrics.CALLS_PLACED.inc(status="initiated")
+    ami_metrics.log_info("call_placed", call_id=call["id"], mid=mid, to=to,
+                          account_id=identity.get("account_id"))
 
     # Delegar la llamada al telco. En mock simula ringing/answer/hangup con
     # Timers; en live pide Originate a Asterisk vía ARI y las transiciones
@@ -6407,14 +6500,16 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/panel/login":
             return respond_html(self, 200, ami_panel.render_login())
         if p == "/panel":
-            if not ami_panel.check_panel_cookie(self):
+            acct_id = ami_panel.check_panel_cookie(self)
+            if not acct_id:
                 return _redirect(self, "/panel/login")
-            return respond_html(self, 200, ami_panel.render_home())
+            return respond_html(self, 200, ami_panel.render_home(acct_id))
         m = re.match(r"^/panel/mid/([^/]+)$", p)
         if m:
-            if not ami_panel.check_panel_cookie(self):
+            acct_id = ami_panel.check_panel_cookie(self)
+            if not acct_id:
                 return _redirect(self, "/panel/login")
-            code, html = ami_panel.render_mid_detail(m.group(1))
+            code, html = ami_panel.render_mid_detail(m.group(1), acct_id)
             return respond_html(self, code, html)
         # Leer límites del MID. Auth: API key del customer.
         m = re.match(r"^/v1/mobile-identities/([^/]+)/limits$", p)
@@ -6524,7 +6619,13 @@ class Handler(BaseHTTPRequestHandler):
                     event("sms_failed", "sms_message", msg_id,
                           {"reason": status_raw, "telco_ref": telco_ref})
                     ami_metrics.SMS_SENT.inc(status="failed")
+                    ami_metrics.log_warn("sms_failed", msg_id=msg_id,
+                                          reason=status_raw,
+                                          attempt=msg.get("retry_count", 0))
                     ami_webhooks.dispatch_event("sms.failed", msg["mid"], msg)
+                    # Retry automático: si quedan intentos, encolamos otro.
+                    if msg.get("retry_count", 0) < SMS_MAX_RETRIES:
+                        _schedule_sms_retry(msg_id)
                 return response(self, 200, msg)
             return response(self, 400, {"error": "unknown_status", "status": status_raw})
 
@@ -6687,11 +6788,13 @@ class Handler(BaseHTTPRequestHandler):
                 event("customer_account_activated", "customer_account", acct["id"], {})
             return response(self, 200, {"id": acct["id"], "status": acct["status"]})
 
-        # Panel login: valida la API key vía form, setea cookie y redirect.
+        # Panel login: valida la API key vía form contra customer_accounts
+        # (resuelve multi-tenant), setea cookie y redirect.
         if p == "/panel/login":
             form = read_form(self)
             key = (form.get("key") or "").strip()
-            if API_KEY is None or not secrets.compare_digest(key, API_KEY):
+            cust = _customer_by_api_key(key) if key else None
+            if not cust:
                 return respond_html(self, 401,
                     ami_panel.render_login(error="Invalid API key."))
             return _redirect(self, "/panel", set_cookie=key)

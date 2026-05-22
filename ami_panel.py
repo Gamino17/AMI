@@ -26,17 +26,23 @@ def _esc(s) -> str:
     return _html.escape(str(s)) if s is not None else ""
 
 
-def check_panel_cookie(handler) -> bool:
-    """Devuelve True si la cookie ami-panel-token coincide con AMI_API_KEY."""
+def check_panel_cookie(handler):
+    """Devuelve el account_id si la cookie ami-panel-token resuelve a un
+    customer-account activo; None si no. La cookie contiene la API key
+    plain del customer; comparamos su hash contra customer_accounts.
+
+    Esto reemplaza la versión single-tenant que devolvía bool. Mantiene
+    backwards-compat con la legacy AMI_API_KEY porque _bootstrap_default_customer
+    crea cust_default con esa key al arrancar."""
     import ami_api
     cookie = handler.headers.get("Cookie", "") or ""
     for part in cookie.split(";"):
         k, _, v = part.strip().partition("=")
         if k == "ami-panel-token" and v:
-            # Comparación constant-time
-            if ami_api.API_KEY and secrets.compare_digest(v, ami_api.API_KEY):
-                return True
-    return False
+            cust = ami_api._customer_by_api_key(v)
+            if cust:
+                return cust["id"]
+    return None
 
 
 # ===================== TEMPLATING =====================
@@ -221,11 +227,14 @@ def _progress_bar(consumed_pct) -> str:
     return f'<div class="progress"><i style="width:{pct:.1f}%"></i></div>'
 
 
-def render_home() -> str:
-    """Dashboard principal: lista MIDs + actividad reciente + spend total."""
+def render_home(account_id: str) -> str:
+    """Dashboard principal del customer-account: lista MIDs + actividad +
+    spend, **filtrado por account_id**. Un customer NO ve los MIDs de otro."""
     import ami_api, ami_limits
-    mids = list(ami_api.STATE["mobile_identities"].values())
+    mids = [m for m in ami_api.STATE["mobile_identities"].values()
+            if not m.get("account_id") or m.get("account_id") == account_id]
     mids.sort(key=lambda i: i.get("activated_at") or "", reverse=True)
+    mid_ids = {m["id"] for m in mids}
 
     # Stats agregadas
     total_spend = 0.0
@@ -255,7 +264,16 @@ def render_home() -> str:
           </tr>
         """)
 
-    events = list(ami_api.STATE["events"])[-15:][::-1]
+    # Audit log filtrado: solo eventos que tocan MIDs del account, más eventos
+    # cuyo entity_id es uno de esos MIDs o cualquier sms/call asociado.
+    def _own(ev):
+        if ev.get("entity_type") == "mobile_identity":
+            return ev.get("entity_id") in mid_ids
+        if ev.get("entity_type") in ("sms_message", "call"):
+            data = ev.get("data") or {}
+            return data.get("mid") in mid_ids
+        return False
+    events = [e for e in ami_api.STATE["events"] if _own(e)][-15:][::-1]
     if events:
         ev_rows = "".join(
             f"<tr><td class='mono'>{_esc(e['at'][:19].replace('T',' '))}</td>"
@@ -333,11 +351,16 @@ def render_home() -> str:
 </html>"""
 
 
-def render_mid_detail(mid: str) -> tuple[int, str]:
-    """Detalle de un MID. Devuelve (status_code, html). 404 si no existe."""
+def render_mid_detail(mid: str, account_id: str) -> tuple[int, str]:
+    """Detalle de un MID, scoped al account del request. Si el MID no
+    pertenece a este account, devolvemos 404 (no 403: no filtramos la
+    existencia del id a customers no dueños)."""
     import ami_api, ami_limits, ami_webhooks
     identity = ami_api.STATE["mobile_identities"].get(mid)
     if not identity:
+        return 404, _render_not_found()
+    owner = identity.get("account_id")
+    if owner and owner != account_id:
         return 404, _render_not_found()
 
     snap = ami_limits.usage_snapshot(identity)

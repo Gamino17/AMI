@@ -181,9 +181,20 @@ def _deliver_with_retries(wh_id: str, url: str, secret: str, body: bytes) -> Non
             wh["status"] = "disabled"
             audit_event("webhook_auto_disabled", "webhook", wh_id,
                         {"url": url, "failure_count": wh["failure_count"]})
+            try:
+                import ami_metrics
+                ami_metrics.log_error("webhook_auto_disabled", wh_id=wh_id,
+                                       url=url, failure_count=wh["failure_count"])
+            except ImportError: pass
         audit_event("webhook_failed", "webhook", wh_id,
                     {"url": url, "error": last_error,
                      "failure_count": wh["failure_count"]})
+        try:
+            import ami_metrics
+            ami_metrics.log_warn("webhook_failed", wh_id=wh_id, url=url,
+                                  error=last_error,
+                                  failure_count=wh["failure_count"])
+        except ImportError: pass
 
 
 def verify_signature(secret: str, body: bytes, signature_header: str) -> bool:
