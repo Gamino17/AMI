@@ -20,12 +20,26 @@ from mcp.server.fastmcp import FastMCP
 
 API_URL = os.environ.get("AMI_API_URL", "http://localhost:8000").rstrip("/")
 API_KEY = os.environ.get("AMI_API_KEY") or None
+# Operations v2: agent_token scoped por MobileIdentity. Las tools de SMS/voz
+# usan este token (no la API key del customer). Las tools que aceptan un
+# agent_token explícito como argumento lo prefieren; si llega vacío, caen al
+# AMI_AGENT_TOKEN del entorno.
+DEFAULT_AGENT_TOKEN = os.environ.get("AMI_AGENT_TOKEN") or None
 
 
 def _headers() -> dict[str, str]:
     h = {"Content-Type": "application/json"}
     if API_KEY:
         h["Authorization"] = f"Bearer {API_KEY}"
+    return h
+
+
+def _agent_headers(agent_token: str | None) -> dict[str, str]:
+    """Headers para los endpoints scoped por agent_token."""
+    token = agent_token or DEFAULT_AGENT_TOKEN
+    h = {"Content-Type": "application/json"}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
     return h
 
 
@@ -38,6 +52,18 @@ async def _get(path: str) -> dict[str, Any]:
 async def _post(path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.post(API_URL + path, json=body or {}, headers=_headers())
+        return {"http_status": r.status_code, "body": _safe_json(r)}
+
+
+async def _agent_get(path: str, agent_token: str | None) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(API_URL + path, headers=_agent_headers(agent_token))
+        return {"http_status": r.status_code, "body": _safe_json(r)}
+
+
+async def _agent_post(path: str, body: dict[str, Any], agent_token: str | None) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.post(API_URL + path, json=body, headers=_agent_headers(agent_token))
         return {"http_status": r.status_code, "body": _safe_json(r)}
 
 
@@ -154,6 +180,25 @@ async def cancel_request(sim_request_id: str, reason: str = "cancelled_by_agent"
           description="Devuelve los últimos AuditEvents del backend (debug/inspección).")
 async def list_events() -> dict:
     return await _get("/v1/events")
+
+
+@mcp.tool(name="ami.send_sms",
+          description="Envía un SMS desde una MobileIdentity activa. Requiere agent_token "
+                      "scoped (Nivel 2). Devuelve el id del mensaje en estado 'queued'; "
+                      "el DLR lo lleva a 'sent' y 'delivered' después.")
+async def send_sms(to: str, body: str, agent_token: str | None = None) -> dict:
+    return await _agent_post("/v1/agent/sms/send", {"to": to, "body": body}, agent_token)
+
+
+@mcp.tool(name="ami.list_sms",
+          description="Lista los SMS de la MobileIdentity del agent_token (más reciente primero). "
+                      "Opcional: filtrar por dirección 'outbound' o 'inbound'.")
+async def list_sms(agent_token: str | None = None, limit: int = 20,
+                   direction: str | None = None) -> dict:
+    qs = f"?limit={int(limit)}"
+    if direction in ("outbound", "inbound"):
+        qs += f"&direction={direction}"
+    return await _agent_get("/v1/agent/sms" + qs, agent_token)
 
 
 @mcp.tool(name="ami.rotate_agent_token",

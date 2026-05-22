@@ -20,6 +20,8 @@ STATE = {
     # Scoped agent tokens (Nivel 2 de auth).
     # token_hash (sha256 hex) -> {mid, customer_id, token_prefix, created_at, status, revoked_at, revoke_reason}
     "agent_tokens": {},
+    # Operations v2 · SMS. msg_id -> message record (ver schema en helpers SMS).
+    "sms_messages": {},
 }
 
 COUNTRIES = {
@@ -163,6 +165,147 @@ def validate_agent_token(handler, expected_mid=None):
     if expected_mid is not None and rec["mid"] != expected_mid:
         return None
     return rec
+
+
+# ----- Operations v2 · SMS ------------------------------------------
+# Schema de mensaje:
+#   id: msg_xxx
+#   mid: MobileIdentity dueña
+#   direction: 'outbound' | 'inbound'
+#   from: E.164 (string con + y dígitos; espacios permitidos)
+#   to:   E.164
+#   body: string ≤ 1000 chars (varios SMS concatenados)
+#   status: 'queued' | 'sent' | 'delivered' | 'failed' (outbound)
+#                  | 'received'                              (inbound)
+#   created_at, delivered_at: ISO
+#   telco_ref: ref opcional del SMSC/partner (string)
+
+# E.164 normalizado: signo +, 6-15 dígitos. Aceptamos espacios y guiones
+# en input — los limpiamos a la hora de validar y guardar.
+_E164_RE = re.compile(r"^\+[1-9]\d{5,14}$")
+
+def _normalize_msisdn(raw):
+    """Acepta '+34 600 549 832', '+34-600-549-832', etc.; devuelve '+34600549832'.
+    Devuelve None si el formato es inválido tras limpieza."""
+    if not isinstance(raw, str): return None
+    s = re.sub(r"[\s\-]", "", raw.strip())
+    if not _E164_RE.match(s): return None
+    return s
+
+
+def _find_mid_by_phone(phone_norm):
+    """Busca una MobileIdentity activa cuyo número (normalizado) coincide."""
+    for mid, identity in STATE["mobile_identities"].items():
+        ph = _normalize_msisdn(identity.get("phone_number", ""))
+        if ph and ph == phone_norm:
+            return mid, identity
+    return None, None
+
+
+def send_sms_outbound(mid, to_raw, body):
+    """Encola un SMS saliente desde el MID. Devuelve (status_code, payload).
+
+    Estado inicial 'queued'; tras un timer corto pasa a 'sent', luego 'delivered'
+    (DLR simulado en v1; cuando conectemos SMSC real lo dispara el partner).
+    """
+    identity = STATE["mobile_identities"].get(mid)
+    if not identity or identity.get("status") != "active":
+        return 409, {"error": "mobile_identity_not_active", "mid": mid}
+    to = _normalize_msisdn(to_raw)
+    if not to:
+        return 400, {"error": "invalid_to", "detail": "expected E.164 (+digits)"}
+    if not isinstance(body, str) or not body.strip():
+        return 400, {"error": "empty_body"}
+    if len(body) > 1000:
+        return 400, {"error": "body_too_long", "max": 1000, "got": len(body)}
+
+    msg = {
+        "id": new_id("msg"),
+        "mid": mid,
+        "direction": "outbound",
+        "from": _normalize_msisdn(identity["phone_number"]),
+        "to": to,
+        "body": body,
+        "status": "queued",
+        "created_at": now(),
+        "delivered_at": None,
+        "telco_ref": None,
+    }
+    STATE["sms_messages"][msg["id"]] = msg
+    event("sms_queued", "sms_message", msg["id"],
+          {"mid": mid, "to": to, "len": len(body)})
+
+    # DLR simulado: queued → sent → delivered con retraso corto.
+    # Solo en in-memory v1. Cuando llegue SMSC real (Kannel), estos cambios de
+    # estado vienen como SUBMIT_SM_RESP y DELIVER_SM_RESP del partner.
+    _schedule_dlr_transitions(msg["id"])
+
+    return 201, msg
+
+
+def _schedule_dlr_transitions(msg_id):
+    """Programa transiciones de estado simuladas en un Timer daemon."""
+    import threading
+    def to_sent():
+        m = STATE["sms_messages"].get(msg_id)
+        if m and m["status"] == "queued":
+            m["status"] = "sent"
+            m["telco_ref"] = "mock:" + secrets.token_hex(6)
+            event("sms_sent", "sms_message", msg_id, {"telco_ref": m["telco_ref"]})
+    def to_delivered():
+        m = STATE["sms_messages"].get(msg_id)
+        if m and m["status"] == "sent":
+            m["status"] = "delivered"
+            m["delivered_at"] = now()
+            event("sms_delivered", "sms_message", msg_id, {})
+    threading.Timer(0.15, to_sent).start()
+    threading.Timer(0.45, to_delivered).start()
+
+
+def record_sms_inbound(from_raw, to_raw, body, telco_ref=None):
+    """Registra un SMS entrante desde el partner telco hacia un MID nuestro."""
+    to = _normalize_msisdn(to_raw)
+    if not to:
+        return 400, {"error": "invalid_to"}
+    from_ = _normalize_msisdn(from_raw) or from_raw  # si el remitente es un short-code no E.164, lo guardamos crudo
+    if not isinstance(body, str):
+        return 400, {"error": "invalid_body"}
+    mid, identity = _find_mid_by_phone(to)
+    if not mid:
+        return 404, {"error": "destination_not_found", "to": to}
+    if identity.get("status") != "active":
+        return 409, {"error": "mobile_identity_not_active", "mid": mid}
+
+    msg = {
+        "id": new_id("msg"),
+        "mid": mid,
+        "direction": "inbound",
+        "from": from_,
+        "to": to,
+        "body": body,
+        "status": "received",
+        "created_at": now(),
+        "delivered_at": now(),
+        "telco_ref": telco_ref,
+    }
+    STATE["sms_messages"][msg["id"]] = msg
+    event("sms_inbound", "sms_message", msg["id"],
+          {"mid": mid, "from": from_, "len": len(body)})
+    return 201, msg
+
+
+def list_sms_for_mid(mid, limit=20, direction=None):
+    """Lista mensajes de un MID, más reciente primero."""
+    msgs = [m for m in STATE["sms_messages"].values() if m["mid"] == mid]
+    if direction in ("outbound", "inbound"):
+        msgs = [m for m in msgs if m["direction"] == direction]
+    msgs.sort(key=lambda m: m["created_at"], reverse=True)
+    return msgs[: max(1, min(int(limit or 20), 200))]
+
+
+# Webhook del partner telco: clave compartida en header X-Telco-Key.
+# Si no está seteada en el entorno, el endpoint queda deshabilitado en prod.
+TELCO_INBOUND_KEY = os.environ.get("AMI_TELCO_INBOUND_KEY") or None
 
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -5465,6 +5608,23 @@ class Handler(BaseHTTPRequestHandler):
                 "status": "active",
             })
 
+        # Listar SMS del MID asociado al agent_token.
+        # Query params: ?limit=20&direction=outbound|inbound
+        if p == "/v1/agent/sms":
+            rec = validate_agent_token(self)
+            if not rec:
+                return response(self, 401, {"error": "invalid_agent_token"})
+            qs = dict(re.findall(r"([^&=?]+)=([^&]*)", urlparse(self.path).query or ""))
+            try:
+                limit = int(qs.get("limit", "20"))
+            except ValueError:
+                return response(self, 400, {"error": "invalid_limit"})
+            direction = qs.get("direction")
+            if direction and direction not in ("outbound", "inbound"):
+                return response(self, 400, {"error": "invalid_direction"})
+            msgs = list_sms_for_mid(rec["mid"], limit=limit, direction=direction)
+            return response(self, 200, {"messages": msgs, "count": len(msgs)})
+
         if not is_public("GET", p) and not check_auth(self):
             return response(self, 401, {"error": "unauthorized"})
         if p == "/" or p == "/index.html":
@@ -5517,6 +5677,38 @@ class Handler(BaseHTTPRequestHandler):
     # ----------------------------------------------------------------- POST
     def do_POST(self):
         p = urlparse(self.path).path
+
+        # Endpoints scoped por agent_token: hacen su propia validación
+        # antes del check_auth global del customer.
+        if p == "/v1/agent/sms/send":
+            rec = validate_agent_token(self)
+            if not rec:
+                return response(self, 401, {"error": "invalid_agent_token"})
+            try: data = read_json(self)
+            except Exception as e:
+                return response(self, 400, {"error": "invalid_json", "detail": str(e)})
+            code, body = send_sms_outbound(rec["mid"], data.get("to"), data.get("body", ""))
+            return response(self, code, body)
+
+        # Webhook del partner telco para entregar un SMS entrante hacia un MID nuestro.
+        # Auth por clave compartida en header X-Telco-Key (env AMI_TELCO_INBOUND_KEY).
+        # Si la clave no está configurada, el endpoint está deshabilitado.
+        if p == "/v1/_telco/sms/inbound":
+            if not TELCO_INBOUND_KEY:
+                return response(self, 503, {"error": "telco_inbound_disabled"})
+            if self.headers.get("X-Telco-Key", "") != TELCO_INBOUND_KEY:
+                return response(self, 401, {"error": "invalid_telco_key"})
+            try: data = read_json(self)
+            except Exception as e:
+                return response(self, 400, {"error": "invalid_json", "detail": str(e)})
+            code, body = record_sms_inbound(
+                from_raw=data.get("from"),
+                to_raw=data.get("to"),
+                body=data.get("body", ""),
+                telco_ref=data.get("telco_ref"),
+            )
+            return response(self, code, body)
+
         if not is_public("POST", p) and not check_auth(self):
             return response(self, 401, {"error": "unauthorized"})
 
