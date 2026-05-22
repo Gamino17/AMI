@@ -156,6 +156,15 @@ async def list_events() -> dict:
     return await _get("/v1/events")
 
 
+@mcp.tool(name="ami.rotate_agent_token",
+          description="Rota el agent_token de una MobileIdentity activa. "
+                      "Invalida el token anterior al instante (hard rotate) y devuelve "
+                      "uno nuevo en plano. Pensado para usarse desde el cliente owner "
+                      "cuando se sospecha filtración del token.")
+async def rotate_agent_token(mobile_identity_id: str) -> dict:
+    return await _post(f"/v1/mobile-identities/{mobile_identity_id}/rotate-token")
+
+
 def main() -> None:
     transport = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("AMI_MCP_TRANSPORT", "stdio")
     if transport == "stdio":

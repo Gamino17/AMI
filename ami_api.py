@@ -8,7 +8,7 @@ como producción y respeta la máquina de estados de la spec §17.6.
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
-import json, os, re, uuid
+import hashlib, json, os, re, secrets, uuid
 
 STATE = {
     "sim_requests": {},
@@ -17,6 +17,9 @@ STATE = {
     "contracts": {},
     "mobile_identities": {},
     "events": [],
+    # Scoped agent tokens (Nivel 2 de auth).
+    # token_hash (sha256 hex) -> {mid, customer_id, token_prefix, created_at, status, revoked_at, revoke_reason}
+    "agent_tokens": {},
 }
 
 COUNTRIES = {
@@ -102,6 +105,64 @@ def check_auth(handler):
         return True  # dev mode: sin AMI_API_KEY seteada se permite todo
     auth = handler.headers.get("Authorization", "")
     return auth.startswith("Bearer ") and auth[7:] == API_KEY
+
+
+# ----- Scoped agent tokens (Nivel 2 de auth) -------------------------
+# Cada MobileIdentity activa tiene su propio bearer. Devuelto en plano
+# una sola vez al activar el número; guardamos solo el hash. Endpoints
+# de operación scoped-a-agente (send_sms, start_call, etc., cuando los
+# añadamos) validan este token y comprueban que el MID en URL coincide
+# con el MID al que pertenece el token. Rotación hard: el viejo muere.
+
+def _hash_token(plain): return hashlib.sha256(plain.encode("utf-8")).hexdigest()
+
+
+def mint_agent_token(mid, customer_id):
+    """Genera un agent_token scoped al MID. Devuelve el plano una vez."""
+    plain = "amiagt_live_" + secrets.token_hex(32)
+    th = _hash_token(plain)
+    STATE["agent_tokens"][th] = {
+        "mid": mid,
+        "customer_id": customer_id,
+        "token_prefix": plain[:18],   # para mostrar "amiagt_live_7f3a9b" sin exponer el resto
+        "created_at": now(),
+        "status": "active",
+        "revoked_at": None,
+        "revoke_reason": None,
+    }
+    return plain, th
+
+
+def revoke_agent_tokens_for_mid(mid, reason):
+    """Revoca TODOS los tokens activos vinculados a un MID."""
+    n = 0
+    for th, t in STATE["agent_tokens"].items():
+        if t["mid"] == mid and t["status"] == "active":
+            t["status"] = "revoked"
+            t["revoked_at"] = now()
+            t["revoke_reason"] = reason
+            n += 1
+    return n
+
+
+def validate_agent_token(handler, expected_mid=None):
+    """Verifica el header Authorization Bearer como agent_token.
+
+    Devuelve el record del token si es válido (y opcionalmente está
+    bound al expected_mid). Devuelve None si no es válido.
+    """
+    auth = handler.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    plain = auth[7:].strip()
+    if not plain.startswith("amiagt_"):
+        return None
+    rec = STATE["agent_tokens"].get(_hash_token(plain))
+    if not rec or rec["status"] != "active":
+        return None
+    if expected_mid is not None and rec["mid"] != expected_mid:
+        return None
+    return rec
 
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -4649,6 +4710,26 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ GET
     def do_GET(self):
         p = urlparse(self.path).path
+
+        # Endpoints scoped por agent_token: hacen su propia validación
+        # antes del check_auth global del customer.
+        if p == "/v1/agent/self":
+            rec = validate_agent_token(self)
+            if not rec:
+                return response(self, 401, {"error": "invalid_agent_token"})
+            identity = STATE["mobile_identities"].get(rec["mid"])
+            if not identity or identity.get("status") != "active":
+                return response(self, 409, {"error": "mobile_identity_not_active"})
+            return response(self, 200, {
+                "mobile_identity_id": rec["mid"],
+                "customer_id": rec["customer_id"],
+                "phone_number": identity.get("phone_number"),
+                "capabilities": identity.get("capabilities"),
+                "token_prefix": rec["token_prefix"],
+                "token_created_at": rec["created_at"],
+                "status": "active",
+            })
+
         if not is_public("GET", p) and not check_auth(self):
             return response(self, 401, {"error": "unauthorized"})
         if p == "/" or p == "/index.html":
@@ -4769,6 +4850,13 @@ class Handler(BaseHTTPRequestHandler):
                                        reason=data.get("reason", "cancelled_by_client"))
             except ValueError as e:
                 return response(self, 409, {"error": str(e)})
+            # Si la SIMRequest tenía MID asociado, revocar sus agent_tokens.
+            mid = req.get("mobile_identity_id")
+            if mid:
+                revoked = revoke_agent_tokens_for_mid(mid, "sim_request_cancelled")
+                if revoked:
+                    event("agent_token_revoked", "mobile_identity", mid,
+                          {"count": revoked, "reason": "sim_request_cancelled"})
             return response(self, 200, req)
 
         # Submit customer data: crea cliente + lo vincula a la SIMRequest
@@ -4865,6 +4953,29 @@ class Handler(BaseHTTPRequestHandler):
             return response(self, code, body)
 
         # Activar MobileIdentity (telco mock = lo único realmente simulado)
+        # Rotación de agent_token. Auth: API key del customer (Nivel 1).
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/rotate-token$", p)
+        if m:
+            mid = m.group(1)
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity:
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            if identity.get("status") != "active":
+                return response(self, 409, {"error": "mobile_identity_not_active",
+                                            "status": identity.get("status")})
+            revoked = revoke_agent_tokens_for_mid(mid, "rotated")
+            new_plain, _ = mint_agent_token(mid, identity["customer_id"])
+            event("agent_token_rotated", "mobile_identity", mid,
+                  {"revoked_count": revoked, "new_token_prefix": new_plain[:18]})
+            return response(self, 200, {
+                "mid": mid,
+                "agent_token": new_plain,
+                "revoked_previous": revoked,
+                "rotated_at": now(),
+                "agent_token_hint": "El token anterior queda invalidado al instante. "
+                                    "Actualiza AMI_AGENT_TOKEN del agente con este valor.",
+            })
+
         if p == "/v1/mobile-identities/activate":
             contract_id = data.get("contract_id")
             contract = STATE["contracts"].get(contract_id)
@@ -4891,7 +5002,22 @@ class Handler(BaseHTTPRequestHandler):
             if req and req["status"] == "provisioning":
                 transition_sim_request(req, "active")
                 req["mobile_identity_id"] = mid
-            return response(self, 201, identity)
+
+            # Emitir agent_token scoped al MID. Lo devolvemos UNA SOLA VEZ
+            # en plano en esta respuesta; en BD guardamos solo el hash.
+            agent_token, _ = mint_agent_token(mid, contract["customer_id"])
+            event("agent_token_issued", "mobile_identity", mid,
+                  {"token_prefix": agent_token[:18]})
+
+            # Copia para no contaminar el record con el plano.
+            resp_body = dict(identity)
+            resp_body["agent_token"] = agent_token
+            resp_body["agent_token_hint"] = (
+                "Guarda este token: solo se muestra una vez. "
+                "Inyéctalo al agente como AMI_AGENT_TOKEN. "
+                "Si se filtra, rota con POST /v1/mobile-identities/" + mid + "/rotate-token."
+            )
+            return response(self, 201, resp_body)
 
         return response(self, 404, {"error": "unknown_route", "path": p})
 

@@ -77,6 +77,7 @@ def reset_state(ami_api_module):
     state["contracts"].clear()
     state["mobile_identities"].clear()
     state["events"].clear()
+    state.get("agent_tokens", {}).clear()
     yield
 
 
@@ -113,3 +114,31 @@ def fresh_sim_request(client):
     r = client.post("/v1/sim-requests", json={"country": "ES", "sim_type": "eSIM"})
     assert r.status_code == 201, f"setup failed: {r.status_code} {r.text}"
     return r.json()
+
+
+@pytest.fixture
+def active_identity(client, sample_customer_payload):
+    """End-to-end: crea SIMRequest, acepta oferta, manda datos cliente, contrato,
+    firma vía mock-sign, activa MobileIdentity. Devuelve {identity, agent_token}."""
+    r = client.post("/v1/sim-requests", json={"country": "ES", "sim_type": "eSIM"})
+    assert r.status_code == 201
+    sim = r.json()["sim_request"]
+    offer = r.json()["offer"]
+    client.post(f"/v1/offers/{offer['id']}/accept")
+    cust = client.post(f"/v1/sim-requests/{sim['id']}/customer-data",
+                       json={"customer": sample_customer_payload})
+    customer = cust.json()["customer"]
+    contract = client.post("/v1/contracts",
+                           json={"offer_id": offer["id"], "customer_id": customer["id"]})
+    contract_id = contract.json()["id"]
+    client.post(f"/v1/contracts/{contract_id}/mock-sign")
+    r = client.post("/v1/mobile-identities/activate",
+                    json={"contract_id": contract_id})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    return {
+        "identity": body,
+        "agent_token": body["agent_token"],
+        "mid": body["id"],
+        "sim_request_id": sim["id"],
+    }
