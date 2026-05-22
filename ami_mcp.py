@@ -342,7 +342,7 @@ def main() -> None:
         #   - RENDER_EXTERNAL_HOSTNAME (Render lo expone, p.ej. ami-mcp-http.onrender.com)
         #   - AMI_MCP_PUBLIC_HOST: lista separada por comas con dominios custom
         #     (p.ej. mcp.protocolami.com,otrodominio.com)
-        # Sin esto, el server responde 421 "Invalid Host header" a Cloudflare.
+        # Sin esto, el server responde 421 "Invalid Host header" al proxy.
         hosts_to_allow = []
         render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
         if render_host:
@@ -404,8 +404,8 @@ def main() -> None:
             "<div class=\"pill\">MCP HTTP server</div>"
             "<h1>AMI<span class=\"dot\">.</span></h1>"
             "<p>This URL is the <strong>streamable-http MCP endpoint</strong> for AI agents, "
-            "not a website. Point any MCP-compatible client (Claude Desktop, OpenClaw, "
-            "custom SDK, etc.) at <code>/mcp</code> and it will see the 11 <code>ami.*</code> tools.</p>"
+            "not a website. Point any MCP-compatible client at <code>/mcp</code> "
+            "and it will see the <code>ami.*</code> tools (contract, SMS, voice, governance).</p>"
             "<p>If you arrived here from a browser, you probably want the AMI landing page:</p>"
             f"<a class=\"btn\" href=\"{landing_url}\">Go to ami-mock-api &rarr;</a>"
             "</div></body></html>"

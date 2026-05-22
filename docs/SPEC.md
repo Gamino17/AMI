@@ -120,7 +120,7 @@ AMI v1 cubre **contratación y aprovisionamiento**. La operación posterior (lla
     "tax_id": "B00000000"
   },
   "agent": {
-    "agent_id": "demerzel",
+    "agent_id": "agent01",
     "display_name": "Agente01",
     "role": "business_assistant"
   },
@@ -437,7 +437,7 @@ Ejemplo de `SIMRequest`:
   "country": "ES",
   "sim_type": "eSIM",
   "capabilities": ["sms", "voice"],
-  "agent_id": "agent_demerzel",
+  "agent_id": "agent01",
   "customer_id": null,
   "status": "offer_created",
   "created_at": "2026-05-08T15:00:00Z"
@@ -453,7 +453,7 @@ Ejemplo de `MobileIdentity`:
   "phone_number": "+34600000000",
   "sim_type": "eSIM",
   "capabilities": ["sms", "voice"],
-  "agent_id": "agent_demerzel",
+  "agent_id": "agent01",
   "customer_id": "customer_789",
   "contract_id": "contract_456",
   "provider_activation_id": "act_999"
