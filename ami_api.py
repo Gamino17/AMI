@@ -79,26 +79,183 @@ _SPEC_MD_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "docs", "SPEC.md",
 )
+_SPEC_MD_EN_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "docs", "SPEC.en.md",
+)
 try:
     with open(_SPEC_MD_PATH, "r", encoding="utf-8") as _f:
         SPEC_MD = _f.read()
 except FileNotFoundError:
     SPEC_MD = "# AMI spec missing on server\n"
+try:
+    with open(_SPEC_MD_EN_PATH, "r", encoding="utf-8") as _f:
+        SPEC_MD_EN = _f.read()
+except FileNotFoundError:
+    SPEC_MD_EN = SPEC_MD  # fallback al castellano si no hay traducción
 
 # Cache del documento de partnership (markdown), leído al arrancar.
 _PARTNERSHIP_MD_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "docs", "PARTNERSHIP.md",
 )
+_PARTNERSHIP_MD_EN_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "docs", "PARTNERSHIP.en.md",
+)
 try:
     with open(_PARTNERSHIP_MD_PATH, "r", encoding="utf-8") as _f:
         PARTNERSHIP_MD = _f.read()
 except FileNotFoundError:
     PARTNERSHIP_MD = "# AMI partnership doc missing on server\n"
+try:
+    with open(_PARTNERSHIP_MD_EN_PATH, "r", encoding="utf-8") as _f:
+        PARTNERSHIP_MD_EN = _f.read()
+except FileNotFoundError:
+    PARTNERSHIP_MD_EN = PARTNERSHIP_MD
 
 # Configuración pública (URLs que aparecen en la landing y en /llms.txt).
 REPO_URL = os.environ.get("AMI_REPO_URL", "https://github.com/Gamino17/AMI")
 MCP_HTTP_URL = os.environ.get("AMI_MCP_HTTP_URL", "https://mcp.protocolami.com/mcp/")
+
+
+# i18n helper inyectado en /spec, /partners, /experience, /diagram. Estas
+# páginas hoy son sólo en castellano; cuando el visitante tiene `ami-lang`=en
+# en localStorage (lo cambia desde la landing), mostramos un banner pequeño
+# y un toggle EN/ES en la esquina superior derecha que persiste la
+# preferencia. El contenido sigue mostrándose en castellano hasta que se
+# traduzca cada page en una tanda dedicada — pero el usuario sabe por qué
+# y puede volver a la landing en inglés con un click.
+#
+# Es JS plano (no f-string), así que sus llaves son llaves reales.
+LANG_AUGMENT_CSS = """
+  .ami-lang-toggle {
+    position: fixed; top: 12px; right: 12px; z-index: 9999;
+    background: rgba(20,20,29,0.85);
+    backdrop-filter: saturate(140%) blur(10px);
+    -webkit-backdrop-filter: saturate(140%) blur(10px);
+    border: 1px solid rgba(255,255,255,0.10);
+    color: #ededf2;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.05em;
+    padding: 0.4rem 0.7rem; border-radius: 6px; cursor: pointer;
+  }
+  .ami-lang-toggle:hover { border-color: #8b6cff; }
+  .ami-lang-banner {
+    position: sticky; top: 0; z-index: 99;
+    background: rgba(139,108,255,0.10);
+    border-bottom: 1px solid rgba(139,108,255,0.25);
+    color: #ededf2;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 0.78rem;
+    padding: 0.55rem 1rem; text-align: center;
+  }
+  .ami-lang-banner a { color: #5dd1ff; text-decoration: underline; }
+  .ami-lang-banner a:hover { color: #b9e6ff; }
+"""
+
+def _detect_lang(handler) -> str:
+    """Decide qué idioma servir para una página dada. Orden de preferencia:
+      1. Query string ?lang=en|es (lo que pone el toggle al recargar)
+      2. Cookie ami-lang (si el browser la ha promovido al server)
+      3. Accept-Language del browser
+      4. Castellano por defecto."""
+    try:
+        qs = dict(re.findall(r"([^&=?]+)=([^&]*)", urlparse(handler.path).query or ""))
+    except Exception:
+        qs = {}
+    if qs.get("lang") in ("en", "es"):
+        return qs["lang"]
+    cookie = handler.headers.get("Cookie", "")
+    m = re.search(r"ami-lang=(en|es)", cookie)
+    if m:
+        return m.group(1)
+    accept = (handler.headers.get("Accept-Language") or "").lower()
+    if accept.startswith("en"):
+        return "en"
+    return "es"
+
+
+def _with_lang_augment(html: str, lang: str = "es", has_en_content: bool = False) -> str:
+    """Inyecta el toggle EN/ES + (si toca) banner 'currently in Spanish'.
+
+    - Si `lang == "en"` y la página NO ha sido renderizada con contenido en
+      inglés (has_en_content=False), añade banner pidiendo ir a la landing en
+      inglés. Si SÍ ha sido renderizada en inglés (has_en_content=True), no
+      hay banner — solo el toggle.
+    - Reemplaza `<html lang="es">` por `<html lang="<lang>">` si toca.
+    Idempotente: si la landing ya trae su propio toggle, el JS lo respeta."""
+    meta = ""
+    if has_en_content and lang == "en":
+        meta = '<meta name="ami-content-lang" content="en">\n'
+    style = f"{meta}<style>{LANG_AUGMENT_CSS}</style>\n</head>"
+    script = f"<script>{LANG_AUGMENT_JS}</script>\n</body>"
+    out = html.replace("</head>", style, 1).replace("</body>", script, 1)
+    if lang == "en":
+        out = out.replace('<html lang="es">', '<html lang="en">', 1)
+    return out
+
+
+LANG_AUGMENT_JS = """
+(function() {
+  // Helper: persiste 'ami-lang' como cookie de sesión + localStorage, y navega
+  // a la misma URL añadiendo ?lang=xx para que el server (que no ve localStorage)
+  // sirva la versión correcta del contenido en el próximo request.
+  function persistAndReload(next) {
+    try { localStorage.setItem('ami-lang', next); } catch(e) {}
+    document.cookie = 'ami-lang=' + next + '; path=/; max-age=' + (60*60*24*365);
+    var url = new URL(window.location.href);
+    url.searchParams.set('lang', next);
+    window.location.href = url.toString();
+  }
+
+  // Si llegamos con ?lang=xx (vía toggle o link), sincroniza el lang del <html>
+  // y el localStorage por si el usuario navega después.
+  var qsLang = new URLSearchParams(window.location.search).get('lang');
+  if (qsLang === 'es' || qsLang === 'en') {
+    document.documentElement.lang = qsLang;
+    try { localStorage.setItem('ami-lang', qsLang); } catch(e) {}
+    document.cookie = 'ami-lang=' + qsLang + '; path=/; max-age=' + (60*60*24*365);
+  }
+
+  // Idempotente: si la página ya trae su propio toggle (landing), no añadimos
+  // otro — pero sí actualizamos el comportamiento del existente.
+  var existing = document.getElementById('langToggle');
+  var lang = document.documentElement.lang || 'es';
+
+  if (existing) {
+    existing.addEventListener('click', function(e) {
+      e.preventDefault(); e.stopPropagation();
+      persistAndReload(lang === 'es' ? 'en' : 'es');
+    }, true);
+    return;
+  }
+
+  // Banner cuando se eligió EN pero esta página sigue en castellano (sin
+  // SPEC.en.md / PARTNERSHIP.en.md, p.ej. /experience y /diagram). El meta
+  // 'ami-content-lang' indica que el contenido SÍ está en inglés y no hace
+  // falta avisar.
+  var contentLangMeta = document.querySelector('meta[name="ami-content-lang"]');
+  var contentInEn = contentLangMeta && contentLangMeta.getAttribute('content') === 'en';
+  if (lang === 'en' && !contentInEn) {
+    var banner = document.createElement('div');
+    banner.className = 'ami-lang-banner';
+    banner.innerHTML = 'This page is currently in Spanish. ' +
+                       '<a href="/?lang=en">View the AMI homepage in English →</a>';
+    document.body.insertBefore(banner, document.body.firstChild);
+  }
+
+  // Toggle EN/ES persistente.
+  var btn = document.createElement('button');
+  btn.className = 'ami-lang-toggle';
+  btn.setAttribute('aria-label', 'Toggle language');
+  btn.textContent = lang === 'es' ? 'EN' : 'ES';
+  btn.addEventListener('click', function() {
+    persistAndReload(lang === 'es' ? 'en' : 'es');
+  });
+  document.body.appendChild(btn);
+})();
+"""
 
 
 def is_public(method, path):
@@ -2504,8 +2661,8 @@ def render_markdown(md):
     return "\n".join(out), toc
 
 
-def render_spec_page():
-    body_html, toc = render_markdown(SPEC_MD)
+def render_spec_page(lang: str = "es"):
+    body_html, toc = render_markdown(SPEC_MD_EN if lang == "en" else SPEC_MD)
     toc_html = "".join(
         f'<li><a href="#{slug}">{html_escape(text)}</a></li>'
         for _level, text, slug in toc
@@ -2668,14 +2825,14 @@ def render_spec_page():
 </html>"""
 
 
-def render_partnership_page():
+def render_partnership_page(lang: str = "es"):
     """Página /partners: doc PARTNERSHIP.md renderizado con Mermaid client-side.
 
     Reusa la mayoría del CSS de render_spec_page() y añade:
       - mermaid.js desde CDN (jsdelivr) con tema dark custom matching la paleta
       - estilos extra para envolver los diagramas con un fondo translúcido
     """
-    body_html, toc = render_markdown(PARTNERSHIP_MD)
+    body_html, toc = render_markdown(PARTNERSHIP_MD_EN if lang == "en" else PARTNERSHIP_MD)
     toc_html = "".join(
         f'<li><a href="#{slug}">{html_escape(text)}</a></li>'
         for _level, text, slug in toc
@@ -6004,15 +6161,24 @@ class Handler(BaseHTTPRequestHandler):
             if not identity:
                 return respond_html(self, 404, render_identity_404())
             return respond_html(self, 200, render_identity_page(identity))
-        # Spec del protocolo renderizada como HTML
+        # Selector de idioma para páginas con versión EN dedicada: query
+        # ?lang=en, sino Accept-Language en, sino castellano. /spec y /partners
+        # tienen markdown traducido (SPEC.en.md / PARTNERSHIP.en.md); /experience
+        # y /diagram siguen sólo en castellano y muestran banner cuando lang=en.
+        lang = _detect_lang(self)
+
         if p == "/spec":
-            return respond_html(self, 200, render_spec_page())
+            return respond_html(self, 200, _with_lang_augment(
+                render_spec_page(lang=lang), lang=lang, has_en_content=True))
         if p == "/partners":
-            return respond_html(self, 200, render_partnership_page())
+            return respond_html(self, 200, _with_lang_augment(
+                render_partnership_page(lang=lang), lang=lang, has_en_content=True))
         if p == "/experience":
-            return respond_html(self, 200, render_experience_page())
+            return respond_html(self, 200, _with_lang_augment(
+                render_experience_page(), lang=lang, has_en_content=False))
         if p == "/diagram":
-            return respond_html(self, 200, render_diagram_page())
+            return respond_html(self, 200, _with_lang_augment(
+                render_diagram_page(), lang=lang, has_en_content=False))
         # Leer límites del MID. Auth: API key del customer.
         m = re.match(r"^/v1/mobile-identities/([^/]+)/limits$", p)
         if m:
