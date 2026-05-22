@@ -35,12 +35,14 @@ def test_sign_page_is_public(anon_client, client):
         "offer_id": offer_id, "customer_id": customer["id"],
     }).json()
 
-    # Now hit /v1/sign/{id} and the confirm callback without any auth header.
-    r_get = anon_client.get(f"/v1/sign/{contract['id']}")
+    # Now hit /v1/sign/{id}?t=<token> and the confirm callback without auth.
+    # El signing_token de 128 bits actúa como capability secret de la firma.
+    token = contract["signing_token"]
+    r_get = anon_client.get(f"/v1/sign/{contract['id']}?t={token}")
     assert r_get.status_code == 200
     assert "text/html" in r_get.headers.get("content-type", "")
 
-    r_post = anon_client.post(f"/v1/sign/{contract['id']}/confirm", data={})
+    r_post = anon_client.post(f"/v1/sign/{contract['id']}/confirm?t={token}", data={})
     assert r_post.status_code == 200
     assert "text/html" in r_post.headers.get("content-type", "")
 

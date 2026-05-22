@@ -24,8 +24,9 @@ def signed_ready_contract(client, sample_customer_payload):
 
 def test_sign_page_renders_customer_and_offer_data(anon_client, signed_ready_contract, sample_customer_payload):
     contract = signed_ready_contract
+    t = contract["signing_token"]
 
-    r = anon_client.get(f"/v1/sign/{contract['id']}")
+    r = anon_client.get(f"/v1/sign/{contract['id']}?t={t}")
     assert r.status_code == 200
     assert "text/html" in r.headers.get("content-type", "")
 
@@ -51,9 +52,10 @@ def test_sign_for_unknown_contract_returns_404_html(anon_client):
 
 def test_confirm_sign_flips_contract_to_signed(anon_client, client, signed_ready_contract):
     contract = signed_ready_contract
+    t = contract["signing_token"]
 
     r = anon_client.post(
-        f"/v1/sign/{contract['id']}/confirm",
+        f"/v1/sign/{contract['id']}/confirm?t={t}",
         data={},  # form-urlencoded, empty body
     )
     assert r.status_code == 200
@@ -68,9 +70,10 @@ def test_confirm_sign_flips_contract_to_signed(anon_client, client, signed_ready
 
 def test_reload_sign_page_after_signing_shows_signed_state(anon_client, signed_ready_contract):
     contract = signed_ready_contract
-    anon_client.post(f"/v1/sign/{contract['id']}/confirm", data={})
+    t = contract["signing_token"]
+    anon_client.post(f"/v1/sign/{contract['id']}/confirm?t={t}", data={})
 
-    r = anon_client.get(f"/v1/sign/{contract['id']}")
+    r = anon_client.get(f"/v1/sign/{contract['id']}?t={t}")
     assert r.status_code == 200
     html = r.text
     assert "Firmado" in html

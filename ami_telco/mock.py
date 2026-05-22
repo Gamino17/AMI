@@ -23,19 +23,21 @@ class MockTelcoAdapter(TelcoAdapter):
         msg_id = msg["id"]
 
         def to_sent() -> None:
-            m = ami_api.STATE["sms_messages"].get(msg_id)
-            if m and m["status"] == "queued":
-                m["status"] = "sent"
-                m["telco_ref"] = "mock:" + secrets.token_hex(6)
-                ami_api.event("sms_sent", "sms_message", msg_id,
-                              {"telco_ref": m["telco_ref"]})
+            with ami_api.STATE_LOCK:
+                m = ami_api.STATE["sms_messages"].get(msg_id)
+                if m and m["status"] == "queued":
+                    m["status"] = "sent"
+                    m["telco_ref"] = "mock:" + secrets.token_hex(6)
+                    ami_api.event("sms_sent", "sms_message", msg_id,
+                                  {"telco_ref": m["telco_ref"]})
 
         def to_delivered() -> None:
-            m = ami_api.STATE["sms_messages"].get(msg_id)
-            if m and m["status"] == "sent":
-                m["status"] = "delivered"
-                m["delivered_at"] = ami_api.now()
-                ami_api.event("sms_delivered", "sms_message", msg_id, {})
+            with ami_api.STATE_LOCK:
+                m = ami_api.STATE["sms_messages"].get(msg_id)
+                if m and m["status"] == "sent":
+                    m["status"] = "delivered"
+                    m["delivered_at"] = ami_api.now()
+                    ami_api.event("sms_delivered", "sms_message", msg_id, {})
 
         threading.Timer(0.15, to_sent).start()
         threading.Timer(0.45, to_delivered).start()
@@ -54,19 +56,22 @@ class MockTelcoAdapter(TelcoAdapter):
                 pass  # estado terminal, ignorar
 
         def to_ringing() -> None:
-            c = ami_api.STATE["calls"].get(call_id)
-            if c and c["status"] == "initiated":
-                go("ringing", telco_ref="mock:" + secrets.token_hex(6))
+            with ami_api.STATE_LOCK:
+                c = ami_api.STATE["calls"].get(call_id)
+                if c and c["status"] == "initiated":
+                    go("ringing", telco_ref="mock:" + secrets.token_hex(6))
 
         def to_in_progress() -> None:
-            c = ami_api.STATE["calls"].get(call_id)
-            if c and c["status"] == "ringing":
-                go("in_progress")
+            with ami_api.STATE_LOCK:
+                c = ami_api.STATE["calls"].get(call_id)
+                if c and c["status"] == "ringing":
+                    go("in_progress")
 
         def to_completed() -> None:
-            c = ami_api.STATE["calls"].get(call_id)
-            if c and c["status"] == "in_progress":
-                go("completed", hangup_cause="normal_clearing")
+            with ami_api.STATE_LOCK:
+                c = ami_api.STATE["calls"].get(call_id)
+                if c and c["status"] == "in_progress":
+                    go("completed", hangup_cause="normal_clearing")
 
         threading.Timer(0.15, to_ringing).start()
         threading.Timer(0.40, to_in_progress).start()

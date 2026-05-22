@@ -227,8 +227,11 @@ def test_webhook_signature_verifies(client, anon_client, active_identity, sink, 
         time.sleep(0.05)
     hit = sink["received"][0]
     sig = hit["headers"].get("X-Ami-Signature") or hit["headers"].get("x-ami-signature")
+    ts = hit["headers"].get("X-Ami-Timestamp") or hit["headers"].get("x-ami-timestamp")
     assert sig is not None
-    assert ami_webhooks.verify_signature(secret, hit["body"].encode("utf-8"), sig)
+    assert ts is not None
+    assert ami_webhooks.verify_signature(secret, hit["body"].encode("utf-8"), sig,
+                                          timestamp_header=ts)
 
 
 def test_webhook_with_wrong_secret_fails_verify(client, anon_client, active_identity, sink, telco_key):

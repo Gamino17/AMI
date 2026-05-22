@@ -39,10 +39,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 
 SUPPORTED_EVENTS = {
@@ -53,6 +55,14 @@ SUPPORTED_EVENTS = {
 WEBHOOK_AUTO_DISABLE_THRESHOLD = 10  # tras este nº de fallos consecutivos, off.
 DELIVERY_TIMEOUT_S = 8.0
 RETRY_DELAYS_S = [0.5, 2.0, 8.0]
+
+# Pool global para deliveries — cap el nº de threads concurrentes para
+# protegernos de thread bombs (1000 webhooks × varios eventos en ráfaga).
+# Configurable por env. Si la cola se llena, el siguiente delivery se mete
+# a una cola interna del executor — no spawn ilimitado.
+_MAX_DELIVERY_WORKERS = int(os.environ.get("AMI_WEBHOOK_MAX_WORKERS") or 32)
+_EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_DELIVERY_WORKERS,
+                                thread_name_prefix="ami-webhook")
 
 
 def new_webhook(mid: str, url: str, events: list[str]) -> dict:
@@ -115,13 +125,12 @@ def dispatch_event(event: str, mid: str, data: dict) -> int:
         "data": data,
     }
     body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    # Submitter al pool acotado en lugar de spawn ilimitado de threads daemon.
     for wh in matched:
-        t = threading.Thread(
-            target=_deliver_with_retries,
-            args=(wh["id"], wh["url"], wh["secret"], body_bytes),
-            daemon=True,
+        _EXECUTOR.submit(
+            _deliver_with_retries,
+            wh["id"], wh["url"], wh["secret"], body_bytes,
         )
-        t.start()
     return len(matched)
 
 
@@ -152,10 +161,16 @@ def _deliver_with_retries(wh_id: str, url: str, secret: str, body: bytes) -> Non
                     {"error": f"ssrf_guard_{reason}"})
         return
 
-    sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    # Firmamos `timestamp.body_bytes` (no solo body) para que un replay
+    # fuera de ventana sea detectable. El cliente verifica el ts y compara.
+    import time as _time
+    ts = str(int(_time.time()))
+    signed_payload = ts.encode("ascii") + b"." + body
+    sig = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
     headers = {
         "Content-Type": "application/json",
         "X-Ami-Signature": f"sha256={sig}",
+        "X-Ami-Timestamp": ts,
         "X-Ami-Webhook-Id": wh_id,
         "User-Agent": "AMI/1.0 (+webhooks)",
     }
@@ -223,9 +238,31 @@ def _deliver_with_retries(wh_id: str, url: str, secret: str, body: bytes) -> Non
         except ImportError: pass
 
 
-def verify_signature(secret: str, body: bytes, signature_header: str) -> bool:
-    """Helper que el cliente puede usar (o testear) para validar la firma."""
+def verify_signature(secret: str, body: bytes, signature_header: str,
+                      timestamp_header: str | None = None,
+                      tolerance_sec: int = 300) -> bool:
+    """Verifica la firma HMAC del webhook.
+
+    Si se pasa `timestamp_header` (X-Ami-Timestamp), verifica que esté dentro
+    de ±tolerance_sec del reloj actual y firma `ts.body` (anti-replay).
+    Si NO se pasa, mantiene compat con firmas viejas que solo cubrían `body`.
+    """
     if not signature_header or not signature_header.startswith("sha256="):
         return False
+    presented = signature_header[7:]
+
+    if timestamp_header is not None:
+        import time as _time
+        try:
+            ts = int(timestamp_header)
+        except (TypeError, ValueError):
+            return False
+        if abs(int(_time.time()) - ts) > tolerance_sec:
+            return False
+        signed = timestamp_header.encode("ascii") + b"." + body
+        expected = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, presented)
+
+    # Compat: sin timestamp solo cubre body
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, signature_header[7:])
+    return hmac.compare_digest(expected, presented)

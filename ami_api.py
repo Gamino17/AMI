@@ -8,7 +8,7 @@ como producción y respeta la máquina de estados de la spec §17.6.
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
-import hashlib, json, os, re, secrets, uuid
+import hashlib, json, os, re, secrets, threading, uuid
 
 from ami_telco import get_active_adapter
 import ami_webhooks
@@ -23,6 +23,51 @@ import ami_security
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
 MAX_EVENTS_RETAINED = int(os.environ.get("AMI_MAX_EVENTS_RETAINED") or 5000)
 MAX_WEBHOOKS_PER_MID = int(os.environ.get("AMI_MAX_WEBHOOKS_PER_MID") or 10)
+
+# Rate-limit del panel login (anti credential stuffing).
+PANEL_LOGIN_MAX_ATTEMPTS = int(os.environ.get("AMI_PANEL_LOGIN_MAX") or 10)
+PANEL_LOGIN_WINDOW_S = int(os.environ.get("AMI_PANEL_LOGIN_WINDOW_S") or 300)
+_PANEL_LOGIN_ATTEMPTS: dict[str, list[float]] = {}  # ip -> [ts, ...]
+_PANEL_LOGIN_LOCK = threading.Lock()
+
+
+def _panel_login_throttled(client_ip: str) -> bool:
+    """Devuelve True si la IP ya superó PANEL_LOGIN_MAX_ATTEMPTS en
+    PANEL_LOGIN_WINDOW_S. Sliding window simple."""
+    import time as _time
+    now_ts = _time.time()
+    with _PANEL_LOGIN_LOCK:
+        attempts = _PANEL_LOGIN_ATTEMPTS.setdefault(client_ip, [])
+        # Limpiar entries antiguos
+        cutoff = now_ts - PANEL_LOGIN_WINDOW_S
+        attempts[:] = [t for t in attempts if t > cutoff]
+        if len(attempts) >= PANEL_LOGIN_MAX_ATTEMPTS:
+            return True
+        attempts.append(now_ts)
+        return False
+
+
+# CORS allowlist: por defecto * (compat), pero si AMI_CORS_ORIGINS está seteada,
+# solo esos orígenes pueden hacer cross-origin a endpoints autenticados.
+_CORS_ORIGINS = [o.strip() for o in (os.environ.get("AMI_CORS_ORIGINS") or "*").split(",")]
+
+
+def _cors_origin_for(handler) -> str:
+    """Decide qué Access-Control-Allow-Origin devolver. Si la allowlist es '*',
+    cualquiera. Si es restringida, eco del Origin solo si está en la lista."""
+    if _CORS_ORIGINS == ["*"]:
+        return "*"
+    origin = handler.headers.get("Origin", "")
+    if origin and origin in _CORS_ORIGINS:
+        return origin
+    return ""  # vacío = no header → browser bloquea
+
+# Lock global del STATE. RLock porque algunos handlers anidan llamadas que
+# también necesitan acceso (p.ej. event() dentro de transition_*). El coste
+# es bajo porque las operaciones son O(1) y el server es I/O-bound. En v2
+# si la concurrencia sube se puede particionar por sub-bucket.
+STATE_LOCK = threading.RLock()
+
 
 STATE = {
     "sim_requests": {},
@@ -524,20 +569,21 @@ def _schedule_sms_retry(msg_id):
         return
     delay = SMS_RETRY_BACKOFF_S[min(attempt, len(SMS_RETRY_BACKOFF_S) - 1)]
     def attempt_retry():
-        m = STATE["sms_messages"].get(msg_id)
-        if not m or m["status"] not in ("failed",):
-            return  # ya progresó (sent/delivered) o lo borraron
-        m["retry_count"] = attempt + 1
-        m["status"] = "queued"
-        event("sms_retry", "sms_message", msg_id,
-              {"attempt": attempt + 1, "mid": m.get("mid")})
-        ami_metrics.log_info("sms_retry", msg_id=msg_id, mid=m.get("mid"),
-                              attempt=attempt + 1)
-        try:
-            get_active_adapter().send_sms(m)
-        except Exception as e:
-            m["status"] = "failed"
-            ami_metrics.log_error("sms_retry_error", msg_id=msg_id, error=str(e))
+        with STATE_LOCK:
+            m = STATE["sms_messages"].get(msg_id)
+            if not m or m["status"] not in ("failed",):
+                return  # ya progresó (sent/delivered) o lo borraron
+            m["retry_count"] = attempt + 1
+            m["status"] = "queued"
+            event("sms_retry", "sms_message", msg_id,
+                  {"attempt": attempt + 1, "mid": m.get("mid")})
+            ami_metrics.log_info("sms_retry", msg_id=msg_id, mid=m.get("mid"),
+                                  attempt=attempt + 1)
+            try:
+                get_active_adapter().send_sms(m)
+            except Exception as e:
+                m["status"] = "failed"
+                ami_metrics.log_error("sms_retry_error", msg_id=msg_id, error=str(e))
         # Si tras este intento sigue failed, encolar otro retry
         threading.Timer(0.5, lambda: _schedule_sms_retry(msg_id)).start()
     threading.Timer(delay, attempt_retry).start()
@@ -561,23 +607,24 @@ def _schedule_call_retry(call_id):
         return
     delay = CALL_RETRY_BACKOFF_S[min(attempt, len(CALL_RETRY_BACKOFF_S) - 1)]
     def attempt_retry():
-        c = STATE["calls"].get(call_id)
-        if not c or c["status"] not in ("failed", "no_answer"):
-            return
-        c["retry_count"] = attempt + 1
-        # Resetear estado a initiated y volver a originar
-        c["status"] = "initiated"
-        c["ended_at"] = None
-        c["hangup_cause"] = None
-        event("call_retry", "call", call_id,
-              {"attempt": attempt + 1, "mid": c.get("mid")})
-        ami_metrics.log_info("call_retry", call_id=call_id, mid=c.get("mid"),
-                              attempt=attempt + 1)
-        try:
-            get_active_adapter().place_call(c)
-        except Exception as e:
-            c["status"] = "failed"
-            ami_metrics.log_error("call_retry_error", call_id=call_id, error=str(e))
+        with STATE_LOCK:
+            c = STATE["calls"].get(call_id)
+            if not c or c["status"] not in ("failed", "no_answer"):
+                return
+            c["retry_count"] = attempt + 1
+            # Resetear estado a initiated y volver a originar
+            c["status"] = "initiated"
+            c["ended_at"] = None
+            c["hangup_cause"] = None
+            event("call_retry", "call", call_id,
+                  {"attempt": attempt + 1, "mid": c.get("mid")})
+            ami_metrics.log_info("call_retry", call_id=call_id, mid=c.get("mid"),
+                                  attempt=attempt + 1)
+            try:
+                get_active_adapter().place_call(c)
+            except Exception as e:
+                c["status"] = "failed"
+                ami_metrics.log_error("call_retry_error", call_id=call_id, error=str(e))
     threading.Timer(delay, attempt_retry).start()
 
 
@@ -917,7 +964,10 @@ def response(handler, status, payload):
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode()
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    cors_origin = _cors_origin_for(handler)
+    if cors_origin:
+        handler.send_header("Access-Control-Allow-Origin", cors_origin)
+        handler.send_header("Vary", "Origin")
     handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     handler.send_header("Content-Length", str(len(body)))
@@ -1095,12 +1145,14 @@ def run_quick_demo():
 
     # 4) Crear contrato
     contract_id = new_id("contract")
+    signing_token = secrets.token_urlsafe(24)
     base_url = os.environ.get("AMI_PUBLIC_URL", "http://localhost:8000").rstrip("/")
     contract = {
         "id": contract_id, "status": "signature_pending",
         "offer_id": offer_id, "customer_id": cid,
         "sim_request_id": req_id,
-        "signature_url": f"{base_url}/v1/sign/{contract_id}",
+        "signature_url": f"{base_url}/v1/sign/{contract_id}?t={signing_token}",
+        "signing_token": signing_token,
         "created_at": now(),
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
     }
@@ -1197,7 +1249,7 @@ def render_sign_page(contract):
         f'<p class="ok">✓ Contrato firmado el {html_escape(contract.get("signed_at",""))}.</p>'
         f'<p>El proveedor de identidad móvil completará la activación.</p>'
         if is_signed else
-        f'<form method="post" action="/v1/sign/{html_escape(contract["id"])}/confirm">'
+        f'<form method="post" action="/v1/sign/{html_escape(contract["id"])}/confirm?t={html_escape(contract.get("signing_token",""))}">'
         f'  <button type="submit">Firmar contrato</button>'
         f'</form>'
         f'<p class="legal">Al pulsar "Firmar contrato" aceptas los términos del servicio AMI v1 '
@@ -6380,8 +6432,12 @@ class Handler(BaseHTTPRequestHandler):
         print("AMI", self.address_string(), fmt % args)
 
     def handle_one_request(self):
-        """Wrap del request para persistir STATE + grabar métricas.
+        """Wrap del request para persistir STATE + grabar métricas + serialize
+        acceso al STATE.
 
+        - STATE_LOCK garantiza que un request ejecuta el handler sin que otro
+          thread mute STATE concurrentemente (race conditions en counters,
+          dict size during iteration, etc.). Es RLock para permitir nesting.
         - ami_storage.save_state() escribe el snapshot a SQLite al final del
           ciclo (cuando ami_api.STATE pudo haber mutado).
         - ami_metrics.REQUESTS y LATENCY se incrementan con method+path+status
@@ -6391,7 +6447,8 @@ class Handler(BaseHTTPRequestHandler):
         import time
         t0 = time.monotonic()
         try:
-            super().handle_one_request()
+            with STATE_LOCK:
+                super().handle_one_request()
         finally:
             elapsed = time.monotonic() - t0
             try:
@@ -6550,11 +6607,17 @@ class Handler(BaseHTTPRequestHandler):
                 return False
             events = [e for e in STATE["events"] if _ev_owned(e)][-100:]
             return response(self, 200, {"events": events})
-        # Página HTML de firma (público; no requiere API key)
+        # Página HTML de firma (público; no requiere API key, pero SÍ exige
+        # el signing_token de 128 bits que viene como ?t=... en signature_url).
         m = re.match(r"^/v1/sign/([^/]+)$", p)
         if m:
             contract = STATE["contracts"].get(m.group(1))
             if not contract:
+                return respond_html(self, 404, render_sign_error("Contrato no encontrado."))
+            qs = dict(re.findall(r"([^&=?]+)=([^&]*)", urlparse(self.path).query or ""))
+            presented = qs.get("t", "")
+            expected = contract.get("signing_token")
+            if expected and not (presented and secrets.compare_digest(presented, expected)):
                 return respond_html(self, 404, render_sign_error("Contrato no encontrado."))
             return respond_html(self, 200, render_sign_page(contract))
         # Página pública de identidad móvil
@@ -6881,13 +6944,20 @@ class Handler(BaseHTTPRequestHandler):
                 event("customer_account_activated", "customer_account", acct["id"], {})
             return response(self, 200, {"id": acct["id"], "status": acct["status"]})
 
-        # Panel login: valida la API key vía form contra customer_accounts
-        # (resuelve multi-tenant), setea cookie y redirect.
+        # Panel login: valida la API key vía form contra customer_accounts.
+        # Rate-limit per-IP para evitar credential stuffing.
         if p == "/panel/login":
+            client_ip = self.client_address[0] if self.client_address else "?"
+            if _panel_login_throttled(client_ip):
+                ami_metrics.log_warn("panel_login_throttled", ip=client_ip)
+                return respond_html(self, 429,
+                    ami_panel.render_login(
+                        error="Too many attempts. Wait a few minutes."))
             form = read_form(self)
             key = (form.get("key") or "").strip()
             cust = _customer_by_api_key(key) if key else None
             if not cust:
+                ami_metrics.log_warn("panel_login_failed", ip=client_ip)
                 return respond_html(self, 401,
                     ami_panel.render_login(error="Invalid API key."))
             return _redirect(self, "/panel", set_cookie=key)
@@ -6896,8 +6966,18 @@ class Handler(BaseHTTPRequestHandler):
             return _redirect(self, "/panel/login", clear_cookie=True)
 
         # Callback de firma (HTML form). Antes del read_json porque es form-urlencoded.
+        # Mismo gate del signing_token: el form en la página de firma manda
+        # ?t=... en la action.
         m = re.match(r"^/v1/sign/([^/]+)/confirm$", p)
         if m:
+            contract = STATE["contracts"].get(m.group(1))
+            if not contract:
+                return respond_html(self, 404, render_sign_error("Contrato no encontrado."))
+            qs = dict(re.findall(r"([^&=?]+)=([^&]*)", urlparse(self.path).query or ""))
+            presented = qs.get("t", "")
+            expected = contract.get("signing_token")
+            if expected and not (presented and secrets.compare_digest(presented, expected)):
+                return respond_html(self, 404, render_sign_error("Contrato no encontrado."))
             code, body = sign_contract(m.group(1))
             if code == 404:
                 return respond_html(self, 404, render_sign_error("Contrato no encontrado."))
@@ -7056,12 +7136,19 @@ class Handler(BaseHTTPRequestHandler):
                 req["customer_id"] = customer_id
                 transition_sim_request(req, "customer_data_submitted")
             cid = new_id("contract")
+            # signing_token: 128 bits de entropía. La URL pública de firma lleva
+            # este token aparte del contract_id (que solo es un slug enumerable).
+            # Sin el token la página /v1/sign/{id} responde 404. Esto impide que
+            # un atacante que conoce/enumera contract_ids pueda firmar contratos
+            # ajenos.
+            signing_token = secrets.token_urlsafe(24)
             base_url = os.environ.get("AMI_PUBLIC_URL", "http://localhost:8000").rstrip("/")
             contract = {
                 "id": cid, "status": "signature_pending",
                 "offer_id": offer_id, "customer_id": customer_id,
                 "sim_request_id": offer["sim_request_id"],
-                "signature_url": f"{base_url}/v1/sign/{cid}",
+                "signature_url": f"{base_url}/v1/sign/{cid}?t={signing_token}",
+                "signing_token": signing_token,
                 "created_at": now(),
                 "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
                 "account_id": _request_account_id(self),
