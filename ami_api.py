@@ -13,6 +13,7 @@ import hashlib, json, os, re, secrets, uuid
 from ami_telco import get_active_adapter
 import ami_webhooks
 import ami_limits
+import ami_panel
 
 STATE = {
     "sim_requests": {},
@@ -61,9 +62,9 @@ TERMINAL = {"active", "cancelled", "rejected", "failed"}
 API_KEY = os.environ.get("AMI_API_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram")
-PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+)$")
-PUBLIC_POST_PATHS = ("/v1/demo/quick",)
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/panel", "/panel/login")
+PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+)$")
+PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout")
 PUBLIC_POST_REGEX = re.compile(r"^/v1/sign/[^/]+/confirm$")
 
 # Cache del install.sh leído del disco al arrancar.
@@ -713,6 +714,32 @@ def read_json(handler):
     n = int(handler.headers.get("Content-Length", "0") or 0)
     if not n: return {}
     return json.loads(handler.rfile.read(n).decode())
+
+
+def read_form(handler):
+    """Parsea body form-urlencoded (panel login). Devuelve dict {key: value}."""
+    from urllib.parse import parse_qs
+    n = int(handler.headers.get("Content-Length", "0") or 0)
+    if not n: return {}
+    raw = handler.rfile.read(n).decode("utf-8", errors="replace")
+    parsed = parse_qs(raw, keep_blank_values=True)
+    return {k: v[0] for k, v in parsed.items()}
+
+
+def _redirect(handler, location, set_cookie=None, clear_cookie=False):
+    """Helper: 302 redirect, opcionalmente set/clear cookie de panel."""
+    handler.send_response(302)
+    handler.send_header("Location", location)
+    if clear_cookie:
+        handler.send_header("Set-Cookie",
+                            "ami-panel-token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+    elif set_cookie:
+        # Cookie HttpOnly + Secure (en prod sirve HTTPS) + SameSite=Lax para form-post.
+        handler.send_header("Set-Cookie",
+                            f"ami-panel-token={set_cookie}; Path=/; HttpOnly; "
+                            f"SameSite=Lax; Max-Age={60*60*24*7}")
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
 
 
 def run_quick_demo():
@@ -6179,6 +6206,21 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/diagram":
             return respond_html(self, 200, _with_lang_augment(
                 render_diagram_page(), lang=lang, has_en_content=False))
+
+        # Panel del cliente: auth por cookie ami-panel-token (httpOnly, sólo
+        # validable comparando contra AMI_API_KEY).
+        if p == "/panel/login":
+            return respond_html(self, 200, ami_panel.render_login())
+        if p == "/panel":
+            if not ami_panel.check_panel_cookie(self):
+                return _redirect(self, "/panel/login")
+            return respond_html(self, 200, ami_panel.render_home())
+        m = re.match(r"^/panel/mid/([^/]+)$", p)
+        if m:
+            if not ami_panel.check_panel_cookie(self):
+                return _redirect(self, "/panel/login")
+            code, html = ami_panel.render_mid_detail(m.group(1))
+            return respond_html(self, code, html)
         # Leer límites del MID. Auth: API key del customer.
         m = re.match(r"^/v1/mobile-identities/([^/]+)/limits$", p)
         if m:
@@ -6346,6 +6388,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if not is_public("POST", p) and not check_auth(self):
             return response(self, 401, {"error": "unauthorized"})
+
+        # Panel login: valida la API key vía form, setea cookie y redirect.
+        if p == "/panel/login":
+            form = read_form(self)
+            key = (form.get("key") or "").strip()
+            if API_KEY is None or not secrets.compare_digest(key, API_KEY):
+                return respond_html(self, 401,
+                    ami_panel.render_login(error="Invalid API key."))
+            return _redirect(self, "/panel", set_cookie=key)
+
+        if p == "/panel/logout":
+            return _redirect(self, "/panel/login", clear_cookie=True)
 
         # Callback de firma (HTML form). Antes del read_json porque es form-urlencoded.
         m = re.match(r"^/v1/sign/([^/]+)/confirm$", p)

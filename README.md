@@ -1,5 +1,7 @@
 # AMI — Agent Mobile Identity Protocol
 
+Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
+
 AMI es un protocolo que permite a un agente AI contratar y aprovisionar su propia
 identidad móvil (SIM, eSIM, número de teléfono) de forma autónoma. La única pieza
 simulada en este repo es la SIM física (telco mock); el resto del flujo —oferta,

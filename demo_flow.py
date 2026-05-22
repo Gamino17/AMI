@@ -99,7 +99,7 @@ def main():
         "customer": {
             "legal_name": "Parallax IEI S.L.",
             "tax_id": "B00000000",
-            "billing_email": "demo@parallax.ai",
+            "billing_email": "demo@example.com",
             "address": "Madrid, España",
             "representative_name": "Daniel Gamino",
         }
