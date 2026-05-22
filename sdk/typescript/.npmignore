@@ -1,0 +1,6 @@
+tests/
+tsconfig.test.json
+.vitest-cache/
+coverage/
+*.tsbuildinfo
+.DS_Store

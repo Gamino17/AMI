@@ -36,6 +36,15 @@ ami_state.db-wal
 *.sqlite
 *.sqlite3
 
+# SDK build artifacts
+sdk/python/dist/
+sdk/python/build/
+sdk/python/*.egg-info/
+sdk/typescript/dist/
+sdk/typescript/node_modules/
+sdk/*/.pytest_cache/
+sdk/*/.coverage
+
 # Claude
 .claude/settings.local.json
 

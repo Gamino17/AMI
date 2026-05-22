@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ami-protocol"
+version = "0.1.0"
+description = "Official Python SDK for the AMI protocol (Agent Mobile Identity): provisioning and operation of mobile identities for AI agents."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Parallax IEI" }]
+keywords = ["ami", "agent", "mobile-identity", "sim", "esim", "sms", "voice", "sip", "telephony", "protocol"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "requests>=2.28,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "requests-mock>=1.11",
+    "build>=1.0",
+]
+
+[project.urls]
+Homepage = "https://protocolami.com"
+Documentation = "https://protocolami.com/docs"
+Repository = "https://github.com/parallax-iei/ami"
+Issues = "https://github.com/parallax-iei/ami/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ami = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"

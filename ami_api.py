@@ -34,6 +34,12 @@ STATE = {
     "calls": {},
     # Webhooks salientes scoped por MID. wh_id -> webhook record.
     "webhooks": {},
+    # Multi-tenancy: customer_id -> {id, name, api_key_hash, status,
+    # billing_email, created_at, suspended_at, suspend_reason}. La api_key
+    # solo se guarda hasheada (SHA256 hex). Si AMI_API_KEY (legacy) está
+    # seteada, se crea automáticamente un customer "default" con esa key al
+    # bootear — mantiene compat con la versión single-tenant.
+    "customer_accounts": {},
 }
 
 # Carga del STATE persistido (SQLite). Si AMI_DB_PATH no existe, arranca en
@@ -69,12 +75,15 @@ TERMINAL = {"active", "cancelled", "rejected", "failed"}
 
 
 API_KEY = os.environ.get("AMI_API_KEY") or None
+# Master key para los endpoints /v1/admin/* (gestión de customers). Si no
+# está seteada, esos endpoints devuelven 503.
+ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/panel", "/panel/login", "/metrics")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/panel", "/panel/login", "/metrics", "/v1/admin/customers")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+)$")
-PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout")
-PUBLIC_POST_REGEX = re.compile(r"^/v1/sign/[^/]+/confirm$")
+PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/v1/admin/customers")
+PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate))$")
 
 # Cache del install.sh leído del disco al arrancar.
 _INSTALL_SH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "install.sh")
@@ -299,11 +308,93 @@ def is_public(method, path):
     return False
 
 
+def _hash_api_key(plain: str) -> str:
+    return hashlib.sha256(plain.encode("utf-8")).hexdigest()
+
+
+def _bootstrap_default_customer():
+    """Si AMI_API_KEY (legacy) está seteada y no hay customer aún con esa key,
+    crea uno automáticamente con id 'cust_default'. Esto mantiene 100% de
+    compat con la versión single-tenant: la misma AMI_API_KEY sigue
+    funcionando, todo el state queda asociado a este customer."""
+    if not API_KEY:
+        return
+    h = _hash_api_key(API_KEY)
+    # Si ya existe un customer con esta key, no hacemos nada
+    for c in STATE["customer_accounts"].values():
+        if c.get("api_key_hash") == h:
+            return
+    cust = {
+        "id": "cust_default",
+        "name": "Default",
+        "api_key_hash": h,
+        "api_key_prefix": API_KEY[:8] if len(API_KEY) >= 8 else API_KEY,
+        "status": "active",
+        "billing_email": None,
+        "created_at": now() if STATE.get("events") is not None else None,
+        "suspended_at": None,
+        "suspend_reason": None,
+    }
+    STATE["customer_accounts"]["cust_default"] = cust
+
+
+def _customer_by_api_key(plain: str):
+    """Resuelve una API key plain a un customer record. Devuelve None si no
+    existe customer con esa key o si está suspended."""
+    h = _hash_api_key(plain)
+    for c in STATE["customer_accounts"].values():
+        if c.get("api_key_hash") == h and c.get("status") == "active":
+            return c
+    return None
+
+
 def check_auth(handler):
-    if API_KEY is None:
-        return True  # dev mode: sin AMI_API_KEY seteada se permite todo
+    """Resuelve el Authorization header al account_id del customer-account
+    multi-tenant. Devuelve el id (truthy) o None (falsy). El nombre "account"
+    distingue de "customer" legal (legal_name, tax_id) que vive en STATE["customers"].
+
+    En modo dev (sin AMI_API_KEY ni customer_accounts en DB), devuelve
+    "acct_dev" para mantener el comportamiento permisivo de v1."""
+    if API_KEY is None and not STATE["customer_accounts"]:
+        return "acct_dev"  # dev mode
     auth = handler.headers.get("Authorization", "")
-    return auth.startswith("Bearer ") and auth[7:] == API_KEY
+    if not auth.startswith("Bearer "):
+        return None
+    plain = auth[7:].strip()
+    cust = _customer_by_api_key(plain)
+    if cust is None:
+        return None
+    handler._account_id = cust["id"]
+    return cust["id"]
+
+
+def _request_account_id(handler):
+    """Acceso conveniente al account_id del request actual. Se asume que
+    check_auth ya pasó (o que el endpoint es público y por ende no filtra)."""
+    return getattr(handler, "_account_id", None)
+
+
+def _scoped(obj, account_id):
+    """Filter de multi-tenancy. Devuelve obj si pertenece al account o si no
+    tiene owner asignado; None si pertenece a otro account.
+
+    Esto se aplica en los GETs genéricos de sim-requests, contracts,
+    mobile-identities, etc.: una request del account A no puede ver objetos
+    del account B aunque conozca su id."""
+    if not account_id:
+        return obj
+    owner = obj.get("account_id") if isinstance(obj, dict) else None
+    if owner and owner != account_id:
+        return None
+    return obj
+
+
+def check_admin_auth(handler):
+    """Auth de los endpoints /v1/admin/*. Acepta solo el AMI_ADMIN_KEY."""
+    if ADMIN_KEY is None:
+        return False
+    auth = handler.headers.get("Authorization", "")
+    return auth.startswith("Bearer ") and secrets.compare_digest(auth[7:], ADMIN_KEY)
 
 
 # ----- Scoped agent tokens (Nivel 2 de auth) -------------------------
@@ -1618,6 +1709,12 @@ def _endpoints_for_landing():
         ("GET",  "/v1/agent/calls/{id}",                    "Detalle de una llamada del MID."),
         ("POST", "/v1/agent/calls/{id}/hangup",             "Termina una llamada del MID."),
         ("GET",  "/v1/agent/usage",                         "Usage del MID dueño del agent_token."),
+        # --- Admin (multi-tenancy, auth: AMI_ADMIN_KEY) ---
+        ("POST", "/v1/admin/customers",                     "Crear customer-account (devuelve API key una vez)."),
+        ("GET",  "/v1/admin/customers",                     "Listar customer-accounts (sin secret)."),
+        ("POST", "/v1/admin/customers/{id}/rotate-key",     "Rotar la API key de un customer."),
+        ("POST", "/v1/admin/customers/{id}/suspend",        "Suspender un customer."),
+        ("POST", "/v1/admin/customers/{id}/activate",       "Reactivar un customer suspended."),
         # --- Audit y demo ---
         ("GET",  "/v1/events",                              "Últimos AuditEvents."),
         ("POST", "/v1/demo/quick",                          "Flujo end-to-end completo en una llamada (público, sin auth)."),
@@ -6038,6 +6135,10 @@ def render_openapi():
                     "type": "apiKey", "in": "header", "name": "X-Telco-Key",
                     "description": "Clave compartida con el partner telco para los webhooks /v1/_telco/*. Configurada por AMI_TELCO_INBOUND_KEY.",
                 },
+                "adminKey": {
+                    "type": "http", "scheme": "bearer", "bearerFormat": "AMI_ADMIN_KEY",
+                    "description": "Master key para gestionar customer-accounts en /v1/admin/*. NO se usa para tráfico de cliente.",
+                },
             }
         },
         "security": [{"bearerAuth": []}],
@@ -6048,6 +6149,7 @@ def render_openapi():
             {"name": "Limits", "description": "Rate limits (hora/día), presupuesto mensual y allowlist de países por MID."},
             {"name": "Webhooks", "description": "Webhooks salientes desde AMI hacia el cliente (firmados con HMAC-SHA256)."},
             {"name": "Webhooks telco", "description": "Endpoints internos llamados por el partner telco (autenticados con X-Telco-Key)."},
+            {"name": "Admin", "description": "Multi-tenancy: gestión de customer-accounts. Auth: AMI_ADMIN_KEY (master)."},
             {"name": "Discovery", "description": "Salud, audit, demo, páginas públicas."},
         ],
         "paths": {
@@ -6099,12 +6201,27 @@ def render_openapi():
             "/v1/agent/calls/{id}/hangup":                {"post": {"summary": "Colgar una llamada", "tags": ["Operations v2 · Voz"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}}}},
             "/v1/agent/usage":                            {"get":  {"summary": "Usage del MID dueño del agent_token", "tags": ["Limits"], "security": [{"agentBearer": []}], "responses": {"200": {"description": "OK"}}}},
 
+            # --- Admin (multi-tenancy) ---
+            "/v1/admin/customers": {
+                "get":  {"summary": "Listar customer-accounts (sin exponer secret)", "tags": ["Admin"], "security": [{"adminKey": []}], "responses": {"200": {"description": "OK"}, "401": {"description": "unauthorized_admin"}}},
+                "post": {"summary": "Crear customer-account (devuelve API key una sola vez)", "tags": ["Admin"], "security": [{"adminKey": []}], "responses": {"201": {"description": "Created"}, "401": {"description": "unauthorized_admin"}}},
+            },
+            "/v1/admin/customers/{id}/rotate-key":        {"post": {"summary": "Rotar API key de un customer (hard rotate)", "tags": ["Admin"], "security": [{"adminKey": []}], "responses": {"200": {"description": "OK"}, "404": {"description": "customer_account_not_found"}}}},
+            "/v1/admin/customers/{id}/suspend":           {"post": {"summary": "Suspender un customer (bloquea su tráfico)", "tags": ["Admin"], "security": [{"adminKey": []}], "responses": {"200": {"description": "OK"}}}},
+            "/v1/admin/customers/{id}/activate":          {"post": {"summary": "Reactivar un customer suspended", "tags": ["Admin"], "security": [{"adminKey": []}], "responses": {"200": {"description": "OK"}}}},
+
             # --- Webhooks del partner telco ---
             "/v1/_telco/sms/inbound":                     {"post": {"summary": "Entregar SMS entrante hacia un MID", "tags": ["Webhooks telco"], "security": [{"telcoKey": []}], "responses": {"201": {"description": "Created"}, "401": {"description": "invalid_telco_key"}, "503": {"description": "telco_inbound_disabled"}}}},
             "/v1/_telco/calls/inbound":                   {"post": {"summary": "Consultar a dónde reenviar una llamada entrante", "tags": ["Webhooks telco"], "security": [{"telcoKey": []}], "responses": {"201": {"description": "Forward"}, "409": {"description": "no_inbound_sip_uri"}}}},
             "/v1/_telco/calls/{id}/status":               {"post": {"summary": "Actualizar el estado de una llamada (ringing/in_progress/completed)", "tags": ["Webhooks telco"], "security": [{"telcoKey": []}], "responses": {"200": {"description": "OK"}, "409": {"description": "invalid_call_transition"}}}},
         },
     }
+
+
+# Bootstrap final: si AMI_API_KEY está seteada y no existe un customer con
+# esa key, lo creamos como "cust_default" para mantener compat single-tenant.
+# Se hace aquí (después de todas las funciones) para que `now()` esté disponible.
+_bootstrap_default_customer()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -6317,6 +6434,22 @@ class Handler(BaseHTTPRequestHandler):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             return response(self, 200, ami_limits.usage_snapshot(identity))
 
+        # Admin: listar customer-accounts (auth: AMI_ADMIN_KEY).
+        if p == "/v1/admin/customers":
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            accounts = []
+            for c in STATE["customer_accounts"].values():
+                accounts.append({
+                    "id": c["id"], "name": c.get("name"),
+                    "status": c.get("status"),
+                    "billing_email": c.get("billing_email"),
+                    "api_key_prefix": c.get("api_key_prefix"),
+                    "created_at": c.get("created_at"),
+                    "suspended_at": c.get("suspended_at"),
+                })
+            return response(self, 200, {"accounts": accounts, "count": len(accounts)})
+
         # Listar webhooks salientes de un MID. Auth: API key del customer.
         m = re.match(r"^/v1/mobile-identities/([^/]+)/webhooks$", p)
         if m:
@@ -6332,6 +6465,10 @@ class Handler(BaseHTTPRequestHandler):
             table = m.group(1).replace("-", "_")
             obj = STATE.get(table, {}).get(m.group(2))
             if not obj: return response(self, 404, {"error": "not_found", "id": m.group(2)})
+            # Multi-tenant scoping: si el objeto tiene account_id y no coincide
+            # con el del request, devolvemos 404 (no 403 para no filtrar existencia).
+            if not _scoped(obj, _request_account_id(self)):
+                return response(self, 404, {"error": "not_found", "id": m.group(2)})
             return response(self, 200, obj)
         return response(self, 404, {"error": "unknown_route", "path": p})
 
@@ -6469,6 +6606,87 @@ class Handler(BaseHTTPRequestHandler):
         if not is_public("POST", p) and not check_auth(self):
             return response(self, 401, {"error": "unauthorized"})
 
+        # Admin: crear customer-account (auth: AMI_ADMIN_KEY).
+        # Body: {name, billing_email}. Devuelve la api_key en plano UNA SOLA VEZ.
+        if p == "/v1/admin/customers":
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            try: data = read_json(self)
+            except Exception as e:
+                return response(self, 400, {"error": "invalid_json", "detail": str(e)})
+            name = (data.get("name") or "").strip()
+            if not name:
+                return response(self, 400, {"error": "missing_name"})
+            plain_key = "amik_live_" + secrets.token_hex(24)
+            acct_id = new_id("acct")
+            acct = {
+                "id": acct_id,
+                "name": name,
+                "api_key_hash": _hash_api_key(plain_key),
+                "api_key_prefix": plain_key[:14],
+                "status": "active",
+                "billing_email": data.get("billing_email"),
+                "created_at": now(),
+                "suspended_at": None,
+                "suspend_reason": None,
+            }
+            STATE["customer_accounts"][acct_id] = acct
+            event("customer_account_created", "customer_account", acct_id,
+                  {"name": name, "billing_email": acct["billing_email"]})
+            return response(self, 201, {
+                "id": acct_id, "name": name,
+                "api_key": plain_key,
+                "api_key_hint": "Guarda esta API key. Es la única vez que se "
+                                 "muestra en plano. Tras esto, solo el prefijo "
+                                 "estará visible.",
+                "billing_email": acct["billing_email"],
+                "status": "active",
+                "created_at": acct["created_at"],
+            })
+
+        # Admin: rotar la API key de un customer (hard rotate).
+        m = re.match(r"^/v1/admin/customers/([^/]+)/rotate-key$", p)
+        if m:
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            acct = STATE["customer_accounts"].get(m.group(1))
+            if not acct:
+                return response(self, 404, {"error": "customer_account_not_found"})
+            plain_key = "amik_live_" + secrets.token_hex(24)
+            acct["api_key_hash"] = _hash_api_key(plain_key)
+            acct["api_key_prefix"] = plain_key[:14]
+            event("customer_account_key_rotated", "customer_account", acct["id"], {})
+            return response(self, 200, {
+                "id": acct["id"], "api_key": plain_key,
+                "api_key_hint": "Actualiza tus clientes con esta nueva clave; "
+                                 "la anterior ha quedado invalidada.",
+                "rotated_at": now(),
+            })
+
+        # Admin: suspender/reactivar un customer.
+        m = re.match(r"^/v1/admin/customers/([^/]+)/(suspend|activate)$", p)
+        if m:
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            action = m.group(2)
+            acct = STATE["customer_accounts"].get(m.group(1))
+            if not acct:
+                return response(self, 404, {"error": "customer_account_not_found"})
+            try: data = read_json(self)
+            except Exception: data = {}
+            if action == "suspend":
+                acct["status"] = "suspended"
+                acct["suspended_at"] = now()
+                acct["suspend_reason"] = data.get("reason")
+                event("customer_account_suspended", "customer_account", acct["id"],
+                      {"reason": acct["suspend_reason"]})
+            else:
+                acct["status"] = "active"
+                acct["suspended_at"] = None
+                acct["suspend_reason"] = None
+                event("customer_account_activated", "customer_account", acct["id"], {})
+            return response(self, 200, {"id": acct["id"], "status": acct["status"]})
+
         # Panel login: valida la API key vía form, setea cookie y redirect.
         if p == "/panel/login":
             form = read_form(self)
@@ -6514,6 +6732,7 @@ class Handler(BaseHTTPRequestHandler):
                 "agent": data.get("agent", {}),
                 "commercial_constraints": data.get("commercial_constraints", {}),
                 "created_at": now(), "updated_at": now(),
+                "account_id": _request_account_id(self),
             }
             STATE["sim_requests"][req_id] = req
             event("sim_request_created", "sim_request", req_id, req)
@@ -6524,6 +6743,7 @@ class Handler(BaseHTTPRequestHandler):
                 "id": offer_id, "sim_request_id": req_id, "status": "offer_created",
                 "country": country, "sim_type": req["sim_type"],
                 "capabilities": req["capabilities"] or ["sms", "voice"],
+                "account_id": _request_account_id(self),
                 "monthly_price": price["monthly"], "setup_fee": price["setup"],
                 "currency": price["currency"], "requires_contract": True,
                 "requires_customer_data": True,
@@ -6637,6 +6857,7 @@ class Handler(BaseHTTPRequestHandler):
                 "signature_url": f"{base_url}/v1/sign/{cid}",
                 "created_at": now(),
                 "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+                "account_id": _request_account_id(self),
             }
             STATE["contracts"][cid] = contract
             event("contract_created", "contract", cid, contract)
@@ -6777,6 +6998,7 @@ class Handler(BaseHTTPRequestHandler):
                 "provider_activation_id": new_id("mockact"),
                 "esim_qr_url": f"https://telco.mock/esim/{mid}.qr",
                 "activated_at": now(),
+                "account_id": contract.get("account_id") or _request_account_id(self),
             }
             STATE["mobile_identities"][mid] = identity
             event("mobile_identity_active", "mobile_identity", mid, identity)
