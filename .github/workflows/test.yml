@@ -1,0 +1,77 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # ami_api.py es stdlib pura; sólo necesitamos httpx para los tests
+          # y opcionalmente uvicorn/mcp si requirements.txt los lista (para
+          # validar que ami_mcp.py importa correctamente).
+          pip install pytest httpx
+          if [ -s requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run pytest
+        run: pytest -q --tb=short
+
+      - name: Sanity-render landing pages
+        run: |
+          AMI_API_KEY=ci_test_key python - <<'PY'
+          import ami_api, ami_telco
+          ami_telco.reset_active_adapter()
+          for fn in (
+              ami_api.render_landing,
+              ami_api.render_diagram_page,
+              ami_api.render_experience_page,
+              ami_api.render_partnership_page,
+              ami_api.render_spec_page,
+              ami_api.render_llms_txt,
+          ):
+              assert fn(), f"{fn.__name__} produjo HTML vacío"
+          spec = ami_api.render_openapi()
+          assert spec["openapi"].startswith("3."), spec["openapi"]
+          assert len(spec["paths"]) > 30, "openapi paths shrunk"
+          print(f"OK · openapi paths: {len(spec['paths'])}")
+          PY
+
+  brand-check:
+    # Censo de marcas en superficies públicas. Si entra una marca prohibida,
+    # el job falla y bloquea el merge.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Grep prohibited brands in public surfaces
+        run: |
+          set -e
+          # Marcas comerciales que NO deben aparecer en superficies públicas
+          # (regla del socio: AMI se describe por lo que es, no por contra-marcas).
+          PROHIBITED='twilio|vonage|messagebird|hostinger|vercel|replit|railway|stripe|shopify|cloudflare|demerzel|openclaw'
+          # Archivos donde hacemos el censo (excluye docs/DEPLOYMENT.md y memorias
+          # del developer que sí pueden mencionar tecnologías concretas).
+          FILES="ami_api.py ami_telco/ ami_webhooks.py ami_limits.py ami_mcp.py docs/SPEC.md docs/PARTNERSHIP.md README.md"
+          if grep -RInE -i "$PROHIBITED" $FILES; then
+            echo "::error::Prohibited brand mentions found in public surfaces."
+            exit 1
+          fi
+          echo "OK · no prohibited brands in public surfaces"
