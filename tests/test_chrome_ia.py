@@ -39,22 +39,17 @@ def test_page_chrome_has_all_nav_links(anon_client, path):
 
 
 @pytest.mark.parametrize("path,active", [
-    ("/", "home"),
     ("/docs", "docs"),
     ("/spec", "spec"),
     ("/partners", "partners"),
-    ("/experience", "experience"),
-    ("/diagram", "diagram"),
 ])
 def test_active_link_marked(anon_client, path, active):
     """El link del nav correspondiente a la página actual lleva class='active'
-    y aria-current='page'. La landing ('home') no aparece en el nav, así que
-    saltamos esa verificación."""
+    y aria-current='page'. Cubrimos /docs, /spec, /partners porque están en
+    el nav primario; /experience y /diagram han salido del nav (siguen en
+    footer y en Explore section, pero no son active-able)."""
     r = anon_client.get(path)
     body = r.text
-    if active == "home":
-        # Landing no tiene "Home" en el nav; el link de marca es el activo.
-        return
     assert f'class="active"' in body or 'class="active ' in body
     assert 'aria-current="page"' in body
 

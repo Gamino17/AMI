@@ -20,6 +20,10 @@ import ami_pages_en
 import ami_security
 import ami_docs
 import ami_chrome
+import ami_live
+import ami_use_cases
+import ami_pricing
+import ami_waitlist
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
@@ -93,6 +97,10 @@ STATE = {
     # seteada, se crea automáticamente un customer "default" con esa key al
     # bootear — mantiene compat con la versión single-tenant.
     "customer_accounts": {},
+    # Waitlist: leads captados desde /waitlist o el form embebido en landing.
+    # Lista de dicts {id, name, email, company, use_case, context, created_at,
+    # ip, user_agent}. Persiste en SQLite igual que el resto.
+    "waitlist": [],
 }
 
 # Carga del STATE persistido (SQLite). Si AMI_DB_PATH no existe, arranca en
@@ -133,9 +141,9 @@ API_KEY = os.environ.get("AMI_API_KEY") or None
 ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/panel", "/panel/login", "/metrics", "/v1/admin/customers")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/panel", "/panel/login", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+)$")
-PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/v1/admin/customers")
+PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/v1/admin/customers", "/v1/waitlist")
 PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate))$")
 
 # Cache del install.sh leído del disco al arrancar.
@@ -2455,9 +2463,12 @@ def render_landing():
             <span data-lang="en">Understand what AMI is without writing code.</span>
           </p>
           <ul>
-            <li><a href="/"><strong>Home</strong> — <span data-lang="es">qué es y por qué</span><span data-lang="en">what it is and why</span></a></li>
+            <li><a href="/live"><strong>Live demo</strong> — <span data-lang="es">demo cinemática en vivo</span><span data-lang="en">live cinematic demo</span></a></li>
+            <li><a href="/use-cases"><strong>Use cases</strong> — <span data-lang="es">6 recetas reales con código</span><span data-lang="en">6 real recipes with code</span></a></li>
             <li><a href="/experience"><strong>Experience</strong> — <span data-lang="es">narrativa visual completa</span><span data-lang="en">full visual narrative</span></a></li>
             <li><a href="/diagram"><strong>Diagram</strong> — <span data-lang="es">animación del ciclo de vida</span><span data-lang="en">lifecycle animation</span></a></li>
+            <li><a href="/pricing"><strong>Pricing</strong> — <span data-lang="es">planes Starter / Growth / Enterprise</span><span data-lang="en">Starter / Growth / Enterprise plans</span></a></li>
+            <li><a href="/calculator"><strong>ROI Calculator</strong> — <span data-lang="es">cuánto ahorras vs wrappers</span><span data-lang="en">how much you save vs wrappers</span></a></li>
           </ul>
         </div>
 
@@ -6808,6 +6819,35 @@ class Handler(BaseHTTPRequestHandler):
             return respond_html(self, 200,
                 _with_chrome(ami_docs.render_docs_page(lang=lang),
                               active="docs", lang=lang))
+        if p == "/live":
+            # Demo cinemática controlable — chrome común para nav consistente.
+            return respond_html(self, 200,
+                _with_chrome(ami_live.render_live_page(lang=lang),
+                              active="live", lang=lang))
+        if p == "/use-cases":
+            # El módulo ya incluye chrome inline (header_html + footer_html
+            # llamados internamente), así que no aplicamos _with_chrome.
+            return respond_html(self, 200, ami_use_cases.render_use_cases_page(lang=lang))
+        if p == "/pricing":
+            # El módulo trae <header></header> y <footer></footer> vacíos —
+            # _with_chrome los rellena con el común.
+            return respond_html(self, 200,
+                _with_chrome(ami_pricing.render_pricing_page(lang=lang),
+                              active="pricing", lang=lang))
+        if p == "/calculator":
+            return respond_html(self, 200,
+                _with_chrome(ami_pricing.render_calculator_page(lang=lang),
+                              active="pricing", lang=lang))
+        if p == "/waitlist":
+            # Página standalone con form grande. Chrome común para nav consistente.
+            return respond_html(self, 200,
+                _with_chrome(ami_waitlist.render_waitlist_page(lang=lang),
+                              active="waitlist", lang=lang))
+        if p == "/v1/admin/waitlist":
+            # Listado para admin (auth: AMI_ADMIN_KEY).
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            return response(self, 200, {"entries": ami_waitlist.list_waitlist_entries()})
 
         # Panel del cliente: auth por cookie ami-panel-token (httpOnly, sólo
         # validable comparando contra AMI_API_KEY).
@@ -7143,6 +7183,28 @@ class Handler(BaseHTTPRequestHandler):
             # En ambos casos (recién firmado o ya firmado) renderizamos la página actualizada.
             contract = body if code == 200 else body["contract"]
             return respond_html(self, 200, render_sign_page(contract))
+
+        # Waitlist público: cualquiera puede apuntarse desde /waitlist o el
+        # form embebido en la landing. Validación + anti-spam dentro del módulo.
+        if p == "/v1/waitlist":
+            try: form = read_json(self)
+            except Exception as e:
+                # Soportar también form-urlencoded (form clásico HTML sin JS).
+                try: form = read_form(self)
+                except Exception:
+                    return response(self, 400, {"error": "invalid_body", "detail": str(e)})
+            client_ip = self.client_address[0] if self.client_address else "?"
+            user_agent = self.headers.get("User-Agent", "")
+            code, body = ami_waitlist.submit_waitlist_entry(
+                name=form.get("name") or "",
+                email=form.get("email") or "",
+                company=form.get("company"),
+                use_case=form.get("use_case") or "other",
+                context=form.get("context"),
+                ip=client_ip,
+                user_agent=user_agent,
+            )
+            return response(self, code, body)
 
         # Demo público end-to-end (sin API key): orquesta todo el flujo.
         if p == "/v1/demo/quick":

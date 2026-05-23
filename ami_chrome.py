@@ -27,11 +27,15 @@ MCP_HTTP_URL = os.environ.get("AMI_MCP_HTTP_URL", "https://mcp.protocolami.com/m
 
 # Los items del nav. Cada uno tiene id (para marcar active), href, label.
 # El orden importa: aparece de izquierda a derecha en el header.
+# Prioridad de visibilidad: las páginas de presentación (Live, Docs, Use cases,
+# Pricing) van primero porque son las que más mueven la conversación; las
+# secundarias (Spec, Partners, API, GitHub) cierran y se ocultan en móvil.
 _NAV_ITEMS = [
+    ("live",       "/live",        "Live",       "Live"),
     ("docs",       "/docs",        "Docs",       "Docs"),
+    ("use-cases",  "/use-cases",   "Use cases",  "Use cases"),
+    ("pricing",    "/pricing",     "Pricing",    "Pricing"),
     ("spec",       "/spec",        "Spec",       "Spec"),
-    ("experience", "/experience",  "Experience", "Experience"),
-    ("diagram",    "/diagram",     "Diagram",    "Diagram"),
     ("partners",   "/partners",    "Partners",   "Partners"),
     ("api",        "/openapi.json","API",        "API"),
     ("github",     REPO_URL,       "GitHub",     "GitHub"),
@@ -196,6 +200,9 @@ def footer_html(lang: str = "es") -> str:
             <h5>Product</h5>
             <ul>
               <li><a href="/"><span data-chrome-lang="es">Inicio</span><span data-chrome-lang="en">Home</span></a></li>
+              <li><a href="/live">Live demo</a></li>
+              <li><a href="/use-cases"><span data-chrome-lang="es">Casos de uso</span><span data-chrome-lang="en">Use cases</span></a></li>
+              <li><a href="/pricing">Pricing</a></li>
               <li><a href="/experience">Experience</a></li>
               <li><a href="/diagram">Diagram</a></li>
               <li><a href="/partners">Partners</a></li>
@@ -216,6 +223,8 @@ def footer_html(lang: str = "es") -> str:
             <h5>Operate</h5>
             <ul>
               <li><a href="/panel">Panel</a></li>
+              <li><a href="/calculator">ROI calculator</a></li>
+              <li><a href="/waitlist">Waitlist</a></li>
               <li><a href="{MCP_HTTP_URL}">MCP endpoint</a></li>
               <li><a href="/v1/health">Status</a></li>
               <li><a href="/metrics">Metrics</a></li>
