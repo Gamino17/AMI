@@ -1229,17 +1229,21 @@ def render_live_page(lang: str = "es") -> str:
         if (wf) wf.classList.add('active');
       }}
       think('audio bidireccional · 2-leg bridge · RTP fluyendo');
-      // Particles bidireccional para representar audio fluyendo —
-      // duración generosa (4s base × 1/speed = 10s en slow) para que se
-      // aprecie el bridge en pantalla.
+      // Particles bidireccional para representar audio fluyendo. Densidad
+      // controlada: menos frecuencia + speed más alta para que no se
+      // acumulen partículas viajando cuando la summary aparece después
+      // (esas partículas zombi parecían "flechitas sin destino").
       var audioId = setInterval(function() {{
-        emit(agent, stack, '#5dd1ff', {{ speed: 0.030, size: 2, tail: false }});
-        emit(stack, agent, '#82e0a4', {{ speed: 0.030, size: 2, tail: false }});
-      }}, 220 / speed);
+        emit(agent, stack, '#5dd1ff', {{ speed: 0.050, size: 2, tail: false }});
+        emit(stack, agent, '#82e0a4', {{ speed: 0.050, size: 2, tail: false }});
+      }}, 380 / speed);
       intervals.push(audioId);
-      later(4000, function() {{
+      later(3500, function() {{
         clearInterval(audioId);
         intervals = intervals.filter(function(x) {{ return x !== audioId; }});
+        // Limpiar partículas en vuelo: evita que sigan dibujándose
+        // por encima del audit/summary del siguiente acto.
+        particles = [];
       }});
     }});
     later(21000, function() {{
@@ -1269,6 +1273,10 @@ def render_live_page(lang: str = "es") -> str:
 
     // ============== Summary (23-25s) ==============
     later(23000, function() {{
+      // Limpieza final: cualquier partícula residual (del audio o de los
+      // ultimos webhooks) se descarta antes de mostrar la summary. Sin esto
+      // se veían "flechitas sin destino" al final del demo.
+      particles = [];
       setNarr(0, '<span class="act"><span data-lang="es">listo</span><span data-lang="en">done</span></span>' +
                   '<span data-lang="es">todo bajo nuestro stack propio. Cero proveedores externos.</span>' +
                   '<span data-lang="en">all under our own stack. Zero external providers.</span>');
