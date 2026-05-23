@@ -12,7 +12,7 @@ def test_landing_page_returns_html_with_title(anon_client):
     assert "hero-title" in html, "landing must include the hero block"
     assert 'class="terminal"' in html, "landing must include the terminal hero"
     assert 'id="quickstart"' in html, "landing must include the Quick Start section"
-    assert "<footer>" in html, "landing must include a footer"
+    assert "<footer" in html, "landing must include a footer"
 
 
 def test_landing_page_links_to_discovery_endpoints(anon_client):

@@ -19,6 +19,7 @@ import ami_metrics
 import ami_pages_en
 import ami_security
 import ami_docs
+import ami_chrome
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
@@ -267,6 +268,50 @@ def _detect_lang(handler) -> str:
     if accept.startswith("en"):
         return "en"
     return "es"
+
+
+def _with_chrome(html: str, active: str = "", lang: str = "es") -> str:
+    """Sustituye el <header>...</header> de la página por el header común
+    de ami_chrome, y añade el footer común antes del </body>. Inyecta
+    chrome_css() en el primer <style> y chrome_js() antes del </body>.
+
+    Esta función se aplica a TODAS las páginas públicas (landing, spec,
+    partners, experience, diagram, docs) para garantizar nav y footer
+    consistentes. Las páginas con flujo específico (panel, sign, identity)
+    NO la usan."""
+    import re as _re
+
+    # Inyectar CSS del chrome al final del primer <style>...</style>
+    css = ami_chrome.chrome_css()
+    if "</style>" in html:
+        html = html.replace("</style>", css + "\n</style>", 1)
+    else:
+        # Sin <style> dedicado — meter uno justo antes del </head>
+        html = html.replace("</head>", f"<style>{css}</style>\n</head>", 1)
+
+    # Reemplazar el primer <header>...</header> de la página por el común.
+    # Si la página no tiene <header>, lo insertamos justo después del <body>.
+    new_header = ami_chrome.header_html(active=active, lang=lang).strip()
+    pattern = _re.compile(r"<header[^>]*>.*?</header>", _re.S | _re.I)
+    if pattern.search(html):
+        html = pattern.sub(new_header, html, count=1)
+    else:
+        html = html.replace("<body>", "<body>\n" + new_header, 1)
+
+    # Reemplazar el primer <footer>...</footer> (si existe) por el común;
+    # si no existe, insertar antes del </body>.
+    new_footer = ami_chrome.footer_html(lang=lang).strip()
+    pattern_f = _re.compile(r"<footer[^>]*>.*?</footer>", _re.S | _re.I)
+    if pattern_f.search(html):
+        html = pattern_f.sub(new_footer, html, count=1)
+    else:
+        html = html.replace("</body>", new_footer + "\n</body>", 1)
+
+    # JS del chrome al final del body
+    js_block = f"<script>{ami_chrome.chrome_js()}</script>\n</body>"
+    html = html.replace("</body>", js_block, 1)
+
+    return html
 
 
 def _with_lang_augment(html: str, lang: str = "es", has_en_content: bool = False) -> str:
@@ -1772,6 +1817,50 @@ LANDING_CSS = """
   .flow .hl { color: var(--accent); font-weight: 600; }
   .flow .hl2 { color: var(--accent-2); font-weight: 600; }
 
+  /* EXPLORE · sitemap visible ------------------------------------------- */
+  .explore {
+    padding: 6rem 0 4rem;
+    border-top: 1px solid var(--line);
+    background: var(--bg);
+  }
+  .explore .wrap { max-width: 1280px; margin: 0 auto; padding: 0 1.5rem; }
+  .explore-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem;
+    margin-top: 2.5rem;
+  }
+  @media (max-width: 880px) {
+    .explore-grid { grid-template-columns: 1fr; gap: 1rem; }
+  }
+  .explore-col {
+    background: var(--bg-soft);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 1.8rem 1.6rem;
+  }
+  .explore-col:hover { border-color: rgba(139,108,255,0.4); }
+  .explore-col h3 {
+    font-family: var(--mono); font-size: 0.78rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.18em;
+    color: var(--accent); margin: 0 0 0.6rem;
+  }
+  .explore-col .explore-desc {
+    color: var(--ink-soft); font-size: 0.9rem; margin: 0 0 1.2rem;
+    line-height: 1.5;
+  }
+  .explore-col ul { list-style: none; padding: 0; margin: 0; }
+  .explore-col li {
+    padding: 0.55rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    font-size: 0.88rem;
+  }
+  .explore-col li:last-child { border-bottom: 0; }
+  .explore-col li a { color: var(--ink-soft); text-decoration: none; }
+  .explore-col li a:hover { color: var(--ink); }
+  .explore-col li a strong {
+    color: var(--ink); font-weight: 600;
+    font-family: var(--mono); font-size: 0.86rem;
+  }
+
   /* CTA FINAL ----------------------------------------------------------- */
   .final-cta {
     text-align: center;
@@ -2339,6 +2428,71 @@ def render_landing():
         <span data-lang="en">Auth with <code>Authorization: Bearer $AMI_API_KEY</code> except for healthcheck and the public signature page.</span>
       </p>
       <ul class="endpoint-list">{endpoints_html}</ul>
+    </div>
+  </section>
+
+  <!-- EXPLORE · sitemap visible ========================================= -->
+  <section id="explore" class="explore">
+    <div class="wrap">
+      <div class="eyebrow">
+        <span data-lang="es">explora</span>
+        <span data-lang="en">explore</span>
+      </div>
+      <h2>
+        <span data-lang="es">Todo lo que puedes consultar.</span>
+        <span data-lang="en">Everything you can explore.</span>
+      </h2>
+      <p class="sub">
+        <span data-lang="es">Tres caminos según lo que necesites: ver el producto, construir contra él, u operarlo.</span>
+        <span data-lang="en">Three paths based on what you need: see the product, build against it, or operate it.</span>
+      </p>
+
+      <div class="explore-grid">
+        <div class="explore-col">
+          <h3>Product</h3>
+          <p class="explore-desc">
+            <span data-lang="es">Entiende qué es AMI sin escribir código.</span>
+            <span data-lang="en">Understand what AMI is without writing code.</span>
+          </p>
+          <ul>
+            <li><a href="/"><strong>Home</strong> — <span data-lang="es">qué es y por qué</span><span data-lang="en">what it is and why</span></a></li>
+            <li><a href="/experience"><strong>Experience</strong> — <span data-lang="es">narrativa visual completa</span><span data-lang="en">full visual narrative</span></a></li>
+            <li><a href="/diagram"><strong>Diagram</strong> — <span data-lang="es">animación del ciclo de vida</span><span data-lang="en">lifecycle animation</span></a></li>
+          </ul>
+        </div>
+
+        <div class="explore-col">
+          <h3>Build</h3>
+          <p class="explore-desc">
+            <span data-lang="es">Integra AMI desde tu agente o tu backend.</span>
+            <span data-lang="en">Integrate AMI from your agent or backend.</span>
+          </p>
+          <ul>
+            <li><a href="/docs"><strong>Docs</strong> — <span data-lang="es">portal interactivo con try-it</span><span data-lang="en">interactive portal with try-it</span></a></li>
+            <li><a href="/spec"><strong>Spec</strong> — <span data-lang="es">documento técnico canónico</span><span data-lang="en">canonical technical document</span></a></li>
+            <li><a href="/openapi.json"><strong>OpenAPI 3.1</strong> — <span data-lang="es">para generadores y herramientas</span><span data-lang="en">for generators and tooling</span></a></li>
+            <li><a href="/llms.txt"><strong>llms.txt</strong> — <span data-lang="es">índice para agentes AI</span><span data-lang="en">index for AI agents</span></a></li>
+            <li><a href="{repo}/tree/main/sdk"><strong>SDKs</strong> — Python · TypeScript</a></li>
+            <li><a href="/install.sh"><strong>install.sh</strong> — <span data-lang="es">instalador one-liner</span><span data-lang="en">one-liner installer</span></a></li>
+          </ul>
+        </div>
+
+        <div class="explore-col">
+          <h3>Operate</h3>
+          <p class="explore-desc">
+            <span data-lang="es">Gestiona tus números, customers, partners.</span>
+            <span data-lang="en">Manage your numbers, customers, partners.</span>
+          </p>
+          <ul>
+            <li><a href="/panel"><strong>Panel</strong> — <span data-lang="es">dashboard del customer (auth con API key)</span><span data-lang="en">customer dashboard (API key auth)</span></a></li>
+            <li><a href="/partners"><strong>Partners</strong> — <span data-lang="es">para operadores telco</span><span data-lang="en">for telco operators</span></a></li>
+            <li><a href="{mcp_url}"><strong>MCP endpoint</strong> — <span data-lang="es">para clientes MCP remotos</span><span data-lang="en">for remote MCP clients</span></a></li>
+            <li><a href="/v1/health"><strong>Health</strong> — <span data-lang="es">estado del servicio</span><span data-lang="en">service health</span></a></li>
+            <li><a href="/metrics"><strong>Metrics</strong> — <span data-lang="es">Prometheus exposition</span><span data-lang="en">Prometheus exposition</span></a></li>
+            <li><a href="{repo}"><strong>GitHub</strong> — <span data-lang="es">código + issues</span><span data-lang="en">code + issues</span></a></li>
+          </ul>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -6550,8 +6704,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if not is_public("GET", p) and not check_auth(self):
             return response(self, 401, {"error": "unauthorized"})
+        # Idioma global: el detector se usa tanto para las páginas con chrome
+        # común como para las que tienen bilingual inline (spec, partners).
+        lang = _detect_lang(self)
         if p == "/" or p == "/index.html":
-            return respond_html(self, 200, render_landing())
+            return respond_html(self, 200,
+                _with_chrome(render_landing(), active="home", lang=lang))
         if p == "/llms.txt":
             return respond_text(self, 200, render_llms_txt())
         if p == "/openapi.json":
@@ -6627,32 +6785,29 @@ class Handler(BaseHTTPRequestHandler):
             if not identity:
                 return respond_html(self, 404, render_identity_404())
             return respond_html(self, 200, render_identity_page(identity))
-        # Selector de idioma para páginas con versión EN dedicada: query
-        # ?lang=en, sino Accept-Language en, sino castellano. /spec y /partners
-        # tienen markdown traducido (SPEC.en.md / PARTNERSHIP.en.md); /experience
-        # y /diagram siguen sólo en castellano y muestran banner cuando lang=en.
-        lang = _detect_lang(self)
-
+        # Páginas públicas con chrome común (header + footer reutilizables
+        # de ami_chrome). El chrome reemplaza el <header>/<footer> custom
+        # que cada página traía para garantizar nav consistente entre todas.
         if p == "/spec":
-            return respond_html(self, 200, _with_lang_augment(
-                render_spec_page(lang=lang), lang=lang, has_en_content=True))
+            html = _with_lang_augment(render_spec_page(lang=lang), lang=lang, has_en_content=True)
+            return respond_html(self, 200, _with_chrome(html, active="spec", lang=lang))
         if p == "/partners":
-            return respond_html(self, 200, _with_lang_augment(
-                render_partnership_page(lang=lang), lang=lang, has_en_content=True))
+            html = _with_lang_augment(render_partnership_page(lang=lang), lang=lang, has_en_content=True)
+            return respond_html(self, 200, _with_chrome(html, active="partners", lang=lang))
         if p == "/experience":
-            html = (ami_pages_en.render_experience_page_en() if lang == "en"
+            base = (ami_pages_en.render_experience_page_en() if lang == "en"
                     else render_experience_page())
-            return respond_html(self, 200, _with_lang_augment(
-                html, lang=lang, has_en_content=True))
+            html = _with_lang_augment(base, lang=lang, has_en_content=True)
+            return respond_html(self, 200, _with_chrome(html, active="experience", lang=lang))
         if p == "/diagram":
-            html = (ami_pages_en.render_diagram_page_en() if lang == "en"
+            base = (ami_pages_en.render_diagram_page_en() if lang == "en"
                     else render_diagram_page())
-            return respond_html(self, 200, _with_lang_augment(
-                html, lang=lang, has_en_content=True))
+            html = _with_lang_augment(base, lang=lang, has_en_content=True)
+            return respond_html(self, 200, _with_chrome(html, active="diagram", lang=lang))
         if p == "/docs":
-            # Portal de documentación bilingüe inline (sin _with_lang_augment;
-            # ya trae su propio toggle EN/ES en el header).
-            return respond_html(self, 200, ami_docs.render_docs_page(lang=lang))
+            return respond_html(self, 200,
+                _with_chrome(ami_docs.render_docs_page(lang=lang),
+                              active="docs", lang=lang))
 
         # Panel del cliente: auth por cookie ami-panel-token (httpOnly, sólo
         # validable comparando contra AMI_API_KEY).
