@@ -18,6 +18,7 @@ import ami_storage
 import ami_metrics
 import ami_pages_en
 import ami_security
+import ami_docs
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
@@ -131,7 +132,7 @@ API_KEY = os.environ.get("AMI_API_KEY") or None
 ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/panel", "/panel/login", "/metrics", "/v1/admin/customers")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/panel", "/panel/login", "/metrics", "/v1/admin/customers")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/v1/admin/customers")
 PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate))$")
@@ -1930,6 +1931,7 @@ def _endpoints_for_landing():
         ("GET",  "/identity/{id}",                          "Página pública de una MobileIdentity activa."),
         ("GET",  "/spec",                                   "Spec del protocolo renderizada en HTML."),
         ("GET",  "/diagram",                                "Animación standalone del ciclo de vida del stack."),
+        ("GET",  "/docs",                                   "Portal de documentación interactivo (bilingüe)."),
     ]
 
 
@@ -1987,10 +1989,7 @@ def render_landing():
     <div class="wrap">
       <div class="brand">{AMI_LOGO_SVG} AMI<span class="dot">.</span></div>
       <nav>
-        <a href="#protocol" data-lang="es">Protocolo</a>
-        <a href="#protocol" data-lang="en">Protocol</a>
-        <a href="#connect" data-lang="es">Conectar</a>
-        <a href="#connect" data-lang="en">Connect</a>
+        <a href="/docs">Docs</a>
         <a href="#tools">Tools</a>
         <a href="#api">API</a>
         <a href="/spec">Spec</a>
@@ -6364,6 +6363,7 @@ def render_openapi():
             "/identity/{id}":                             {"get":  {"summary": "Página pública de MobileIdentity", "tags": ["Discovery"], "security": [], "responses": {"200": {"description": "HTML"}}}},
             "/spec":                                      {"get":  {"summary": "Spec del protocolo en HTML", "tags": ["Discovery"], "security": [], "responses": {"200": {"description": "HTML"}}}},
             "/diagram":                                   {"get":  {"summary": "Animación standalone del ciclo de vida del stack", "tags": ["Discovery"], "security": [], "responses": {"200": {"description": "HTML"}}}},
+            "/docs":                                      {"get":  {"summary": "Portal de documentación interactivo (bilingüe ES/EN, try-it widgets, tabs de código)", "tags": ["Discovery"], "security": [], "responses": {"200": {"description": "HTML"}}}},
 
             # --- Contratación (v1) ---
             "/v1/sim-requests":                           {"post": {"summary": "Crear SIMRequest + oferta", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}}}},
@@ -6649,6 +6649,10 @@ class Handler(BaseHTTPRequestHandler):
                     else render_diagram_page())
             return respond_html(self, 200, _with_lang_augment(
                 html, lang=lang, has_en_content=True))
+        if p == "/docs":
+            # Portal de documentación bilingüe inline (sin _with_lang_augment;
+            # ya trae su propio toggle EN/ES en el header).
+            return respond_html(self, 200, ami_docs.render_docs_page(lang=lang))
 
         # Panel del cliente: auth por cookie ami-panel-token (httpOnly, sólo
         # validable comparando contra AMI_API_KEY).
