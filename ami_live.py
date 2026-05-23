@@ -620,9 +620,10 @@ def render_live_page(lang: str = "es") -> str:
         <input id="liveNumber" type="text" value="+34 600 ███ ███" autocomplete="off">
       </div>
       <div class="speed">
-        <button data-speed="0.75">slow</button>
-        <button data-speed="1" class="active">normal</button>
-        <button data-speed="1.5">fast</button>
+        <button data-speed="0.25">very slow</button>
+        <button data-speed="0.4" class="active">slow</button>
+        <button data-speed="0.6">normal</button>
+        <button data-speed="1.0">fast</button>
       </div>
       <button class="live-btn-primary" id="liveStart">
         <span data-lang="es">▶ Iniciar demo</span>
@@ -847,7 +848,11 @@ def render_live_page(lang: str = "es") -> str:
   var running = false;
   var timers = [];
   var intervals = [];
-  var speed = 1.0;
+  // Default 0.4 = animación al 40% de la velocidad original. La duración total
+  // pasa de ~22s a ~55s con el default "slow". El moderador puede subir o
+  // bajar en vivo desde el selector. Pensado para reuniones presenciales
+  // donde hay que narrar mientras pasa.
+  var speed = 0.4;
   var particles = [];
   var W = 0, H = 0;
   var dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -937,13 +942,15 @@ def render_live_page(lang: str = "es") -> str:
     var el = document.getElementById(id);
     if (!el) return;
     el.classList.add('active');
+    // Duración por defecto generosa para que se vea el "active" mientras se
+    // narra. Se divide por speed (speed=0.4 → 2.5× más largo en pantalla).
     timers.push(setTimeout(function() {{ el.classList.remove('active'); }},
-                            (ms || 1500) / speed));
+                            (ms || 2400) / speed));
   }}
   function pulse(actorEl, ms) {{
     actorEl.classList.add('pulsing');
     timers.push(setTimeout(function() {{ actorEl.classList.remove('pulsing'); }},
-                            (ms || 1200) / speed));
+                            (ms || 2000) / speed));
   }}
   function step(idx, state) {{
     var el = steps[idx];
@@ -1111,7 +1118,8 @@ def render_live_page(lang: str = "es") -> str:
       numberReveal.classList.add('show');
       assignedNum.textContent = '+34 600 000 000';
       midId.textContent = fakeMid;
-      rollNumber(fakeNumber, 1100);
+      // Rolling lento del número para que el público lo vea cambiar.
+      rollNumber(fakeNumber, 2200);
     }});
     later(6800, function() {{
       think('POST /v1/mobile-identities/activate → agent_token devuelto UNA SOLA VEZ');
@@ -1162,7 +1170,8 @@ def render_live_page(lang: str = "es") -> str:
       step(3, 'active');
       addTyping();
     }});
-    later(13800, function() {{
+    later(15000, function() {{
+      // Typing indicator visible ~2.5s para que el público vea "está escribiendo"
       removeTyping();
       addBubble('<span data-lang="es">OK, allí estaré ✓</span>' +
                 '<span data-lang="en">OK, I will be there ✓</span>',
@@ -1213,13 +1222,15 @@ def render_live_page(lang: str = "es") -> str:
         if (wf) wf.classList.add('active');
       }}
       think('audio bidireccional · 2-leg bridge · RTP fluyendo');
-      // Particles bidireccional para representar audio fluyendo
+      // Particles bidireccional para representar audio fluyendo —
+      // duración generosa (4s base × 1/speed = 10s en slow) para que se
+      // aprecie el bridge en pantalla.
       var audioId = setInterval(function() {{
-        emit(agent, stack, '#5dd1ff', {{ speed: 0.040, size: 2, tail: false }});
-        emit(stack, agent, '#82e0a4', {{ speed: 0.040, size: 2, tail: false }});
-      }}, 200 / speed);
+        emit(agent, stack, '#5dd1ff', {{ speed: 0.030, size: 2, tail: false }});
+        emit(stack, agent, '#82e0a4', {{ speed: 0.030, size: 2, tail: false }});
+      }}, 220 / speed);
       intervals.push(audioId);
-      later(2000, function() {{
+      later(4000, function() {{
         clearInterval(audioId);
         intervals = intervals.filter(function(x) {{ return x !== audioId; }});
       }});
