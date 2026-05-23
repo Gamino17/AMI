@@ -24,6 +24,10 @@ import ami_live
 import ami_use_cases
 import ami_pricing
 import ami_waitlist
+import ami_pitch
+import ami_sandbox
+import ami_status
+import ami_security_page
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
@@ -141,7 +145,7 @@ API_KEY = os.environ.get("AMI_API_KEY") or None
 ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/panel", "/panel/login", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/v1/admin/customers", "/v1/waitlist")
 PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate))$")
@@ -2463,6 +2467,7 @@ def render_landing():
             <span data-lang="en">Understand what AMI is without writing code.</span>
           </p>
           <ul>
+            <li><a href="/pitch"><strong>Pitch deck</strong> — <span data-lang="es">presentación navegable con flechas</span><span data-lang="en">slide deck navigable with arrows</span></a></li>
             <li><a href="/live"><strong>Live demo</strong> — <span data-lang="es">demo cinemática en vivo</span><span data-lang="en">live cinematic demo</span></a></li>
             <li><a href="/use-cases"><strong>Use cases</strong> — <span data-lang="es">6 recetas reales con código</span><span data-lang="en">6 real recipes with code</span></a></li>
             <li><a href="/experience"><strong>Experience</strong> — <span data-lang="es">narrativa visual completa</span><span data-lang="en">full visual narrative</span></a></li>
@@ -2480,7 +2485,9 @@ def render_landing():
           </p>
           <ul>
             <li><a href="/docs"><strong>Docs</strong> — <span data-lang="es">portal interactivo con try-it</span><span data-lang="en">interactive portal with try-it</span></a></li>
+            <li><a href="/sandbox"><strong>Sandbox</strong> — <span data-lang="es">playground REST en el navegador</span><span data-lang="en">REST playground in the browser</span></a></li>
             <li><a href="/spec"><strong>Spec</strong> — <span data-lang="es">documento técnico canónico</span><span data-lang="en">canonical technical document</span></a></li>
+            <li><a href="/security"><strong>Security</strong> — <span data-lang="es">whitepaper de seguridad</span><span data-lang="en">security whitepaper</span></a></li>
             <li><a href="/openapi.json"><strong>OpenAPI 3.1</strong> — <span data-lang="es">para generadores y herramientas</span><span data-lang="en">for generators and tooling</span></a></li>
             <li><a href="/llms.txt"><strong>llms.txt</strong> — <span data-lang="es">índice para agentes AI</span><span data-lang="en">index for AI agents</span></a></li>
             <li><a href="{repo}/tree/main/sdk"><strong>SDKs</strong> — Python · TypeScript</a></li>
@@ -2498,7 +2505,8 @@ def render_landing():
             <li><a href="/panel"><strong>Panel</strong> — <span data-lang="es">dashboard del customer (auth con API key)</span><span data-lang="en">customer dashboard (API key auth)</span></a></li>
             <li><a href="/partners"><strong>Partners</strong> — <span data-lang="es">para operadores telco</span><span data-lang="en">for telco operators</span></a></li>
             <li><a href="{mcp_url}"><strong>MCP endpoint</strong> — <span data-lang="es">para clientes MCP remotos</span><span data-lang="en">for remote MCP clients</span></a></li>
-            <li><a href="/v1/health"><strong>Health</strong> — <span data-lang="es">estado del servicio</span><span data-lang="en">service health</span></a></li>
+            <li><a href="/status"><strong>Status</strong> — <span data-lang="es">uptime + componentes</span><span data-lang="en">uptime + components</span></a></li>
+            <li><a href="/v1/health"><strong>Health</strong> — <span data-lang="es">JSON crudo</span><span data-lang="en">raw JSON</span></a></li>
             <li><a href="/metrics"><strong>Metrics</strong> — <span data-lang="es">Prometheus exposition</span><span data-lang="en">Prometheus exposition</span></a></li>
             <li><a href="{repo}"><strong>GitHub</strong> — <span data-lang="es">código + issues</span><span data-lang="en">code + issues</span></a></li>
           </ul>
@@ -6843,6 +6851,19 @@ class Handler(BaseHTTPRequestHandler):
             return respond_html(self, 200,
                 _with_chrome(ami_waitlist.render_waitlist_page(lang=lang),
                               active="waitlist", lang=lang))
+        if p == "/pitch":
+            # Modo presentación full-screen — NO usa chrome común
+            # (es una herramienta de presentación, no una página de catálogo).
+            return respond_html(self, 200, ami_pitch.render_pitch_page(lang=lang))
+        if p == "/sandbox":
+            # Playground interactivo — el módulo ya incluye chrome inline.
+            return respond_html(self, 200, ami_sandbox.render_sandbox_page(lang=lang))
+        if p == "/status":
+            # Status público — chrome inline ya incluido.
+            return respond_html(self, 200, ami_status.render_status_page(lang=lang))
+        if p == "/security":
+            # Whitepaper de seguridad — chrome inline ya incluido.
+            return respond_html(self, 200, ami_security_page.render_security_page(lang=lang))
         if p == "/v1/admin/waitlist":
             # Listado para admin (auth: AMI_ADMIN_KEY).
             if not check_admin_auth(self):

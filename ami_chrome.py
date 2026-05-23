@@ -31,13 +31,13 @@ MCP_HTTP_URL = os.environ.get("AMI_MCP_HTTP_URL", "https://mcp.protocolami.com/m
 # Pricing) van primero porque son las que más mueven la conversación; las
 # secundarias (Spec, Partners, API, GitHub) cierran y se ocultan en móvil.
 _NAV_ITEMS = [
+    ("pitch",      "/pitch",       "Pitch",      "Pitch"),
     ("live",       "/live",        "Live",       "Live"),
     ("docs",       "/docs",        "Docs",       "Docs"),
-    ("use-cases",  "/use-cases",   "Use cases",  "Use cases"),
+    ("sandbox",    "/sandbox",     "Sandbox",    "Sandbox"),
     ("pricing",    "/pricing",     "Pricing",    "Pricing"),
     ("spec",       "/spec",        "Spec",       "Spec"),
     ("partners",   "/partners",    "Partners",   "Partners"),
-    ("api",        "/openapi.json","API",        "API"),
     ("github",     REPO_URL,       "GitHub",     "GitHub"),
 ]
 
@@ -225,8 +225,10 @@ def footer_html(lang: str = "es") -> str:
               <li><a href="/panel">Panel</a></li>
               <li><a href="/calculator">ROI calculator</a></li>
               <li><a href="/waitlist">Waitlist</a></li>
+              <li><a href="/sandbox">Sandbox</a></li>
+              <li><a href="/status">Status</a></li>
+              <li><a href="/security">Security</a></li>
               <li><a href="{MCP_HTTP_URL}">MCP endpoint</a></li>
-              <li><a href="/v1/health">Status</a></li>
               <li><a href="/metrics">Metrics</a></li>
             </ul>
           </div>
