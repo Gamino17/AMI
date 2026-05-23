@@ -271,12 +271,19 @@ _LIVE_CSS = """
     to { opacity: 1; transform: translateY(0); }
   }
 
-  /* CANVAS de partículas */
+  /* CANVAS de partículas.
+     Bug previo: el canvas estaba DEBAJO de los actors (z-index:1 vs 2), así
+     que las partículas viajaban tapadas por los recuadros — solo se veían
+     un instante al cruzar el espacio entre actors. Fix: subimos el canvas
+     POR ENCIMA de todo con pointer-events:none, así las partículas se ven
+     siempre y los actors siguen siendo clicables.
+     z-index muy alto + mix-blend para que no tapen visualmente el texto. */
   .live-flow-canvas {
     position: absolute; inset: 1.4rem;
     pointer-events: none;
-    opacity: 0.85;
-    z-index: 1;
+    opacity: 0.92;
+    z-index: 50;
+    mix-blend-mode: screen;
   }
   .live-actor, .live-phone { z-index: 2; position: relative; }
 
