@@ -168,7 +168,7 @@ No estamos describiendo un proyecto futuro. Hay piezas en producción y piezas e
 
 ### En producción
 
-- **Capa 1 completa**: MCP server con 11 tools `ami.*` y REST API con 18 endpoints, ambos accesibles públicamente en `https://protocolami.com` y `https://mcp.protocolami.com/mcp/`.
+- **Capa 1 completa**: MCP server con tools `ami.*` y REST API, ambos accesibles públicamente en `https://protocolami.com` y `https://mcp.protocolami.com/mcp/`.
 - **Capa 2 parcial**: contratos generados, firma electrónica vía página propia, audit log con cada transición de estado, máquina de estados explícita.
 - **Suite de tests pytest** con 58 verificaciones del contrato público.
 - **Validado con agentes externos**: un agente conectado desde otra máquina vía un canal de mensajería ha ejecutado el flujo completo end-to-end sin asistencia humana.

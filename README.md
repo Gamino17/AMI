@@ -104,7 +104,7 @@ Añade al `claude_desktop_config.json`:
 }
 ```
 
-Reinicia el cliente y las 11 tools `ami.*` quedan disponibles para el agente.
+Reinicia el cliente y las tools `ami.*` quedan disponibles para el agente.
 
 ## Conectar a un MCP HTTP remoto
 

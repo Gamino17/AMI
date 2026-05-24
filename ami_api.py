@@ -2037,6 +2037,7 @@ def _endpoints_for_landing():
 
 
 def render_landing():
+    tool_count = len(_tools_for_landing())
     tools_html = "".join(
         f'<div class="tool-cell"><div class="name">{n}</div><div class="desc">{html_escape(d)}</div></div>'
         for n, d in _tools_for_landing()
@@ -2239,8 +2240,8 @@ def render_landing():
       </div>
 
       <p class="qs-foot">
-        <span data-lang="es">Las cuatro vías llegan al mismo MCP server con las 11 tools <code>ami.*</code>. <strong>HTTP remoto</strong> es la opción recomendada para agentes: cero instalación y sin gestionar API key local. Las otras vías son útiles cuando necesitas el MCP corriendo en local (clientes que solo soportan stdio, entornos sin red saliente, etc.).</span>
-        <span data-lang="en">All four paths reach the same MCP server with the 11 <code>ami.*</code> tools. <strong>Remote HTTP</strong> is the recommended option for agents: zero install, no local API key to manage. The other paths are useful when you need the MCP running locally (stdio-only clients, no-egress environments, etc.).</span>
+        <span data-lang="es">Las cuatro vías llegan al mismo MCP server con las {tool_count} tools <code>ami.*</code>. <strong>HTTP remoto</strong> es la opción recomendada para agentes: cero instalación y sin gestionar API key local. Las otras vías son útiles cuando necesitas el MCP corriendo en local (clientes que solo soportan stdio, entornos sin red saliente, etc.).</span>
+        <span data-lang="en">All four paths reach the same MCP server with the {tool_count} <code>ami.*</code> tools. <strong>Remote HTTP</strong> is the recommended option for agents: zero install, no local API key to manage. The other paths are useful when you need the MCP running locally (stdio-only clients, no-egress environments, etc.).</span>
       </p>
 
       <!-- Try in browser ============================================ -->
@@ -2378,8 +2379,8 @@ def render_landing():
         <div class="card">
           <div class="step-tag">stdio · local</div>
           <h3>Claude Desktop / Code</h3>
-          <p data-lang="es">Clona el repo, instala el venv y añade el bloque a tu <code>claude_desktop_config.json</code>. Las 11 tools <code>ami.*</code> aparecen al reiniciar.</p>
-          <p data-lang="en">Clone the repo, install the venv and add the block to your <code>claude_desktop_config.json</code>. The 11 <code>ami.*</code> tools appear after restart.</p>
+          <p data-lang="es">Clona el repo, instala el venv y añade el bloque a tu <code>claude_desktop_config.json</code>. Las {tool_count} tools <code>ami.*</code> aparecen al reiniciar.</p>
+          <p data-lang="en">Clone the repo, install the venv and add the block to your <code>claude_desktop_config.json</code>. The {tool_count} <code>ami.*</code> tools appear after restart.</p>
 <pre>{html_escape(claude_config)}</pre>
         </div>
 
@@ -2416,8 +2417,8 @@ def render_landing():
     <div class="wrap">
       <div class="eyebrow">MCP</div>
       <h2>
-        <span data-lang="es">11 tools. Un namespace.</span>
-        <span data-lang="en">11 tools. One namespace.</span>
+        <span data-lang="es">{tool_count} tools. Un namespace.</span>
+        <span data-lang="en">{tool_count} tools. One namespace.</span>
       </h2>
       <p class="sub">
         <span data-lang="es">Todas en <code>ami.*</code>. Cada una mapea a un endpoint REST equivalente; el agente puede usar la que prefiera sin perder semántica.</span>
@@ -3598,10 +3599,11 @@ def render_experience_page():
       2. "El número" con slot-machine reveal
       3. Network canvas (agentes ↔ AMI ↔ operador) con partículas
       4. Flujo paso a paso scroll-driven
-      5. 11 tools en grid flipable
+      5. Grid flipable de tools
       6. Live demo contra /v1/demo/quick
       7. CTA cierre
     """
+    tool_count = len(_tools_for_landing())
     return f"""<!doctype html>
 <html lang="es">
 <head>
@@ -4753,10 +4755,10 @@ def render_experience_page():
     </div>
   </section>
 
-  <!-- 11 TOOLS ======================================================= -->
+  <!-- TOOLS ========================================================== -->
   <section class="exp exp-tools" id="tools">
     <div class="wrap">
-      <div class="eyebrow reveal">11 tools, un namespace</div>
+      <div class="eyebrow reveal">{tool_count} tools, un namespace</div>
       <h2 class="section-title reveal">Todo lo que un agente necesita,<br>en <span class="grad">ami.*</span></h2>
       <p class="section-sub reveal" style="margin: 0 auto;">
         Cada tool MCP mapea a un endpoint REST equivalente. Tu agente puede usar la
@@ -4789,7 +4791,7 @@ def render_experience_page():
               MCP server (stdio + HTTP)<span class="pipe">·</span>
               REST API<span class="pipe">·</span>
               OpenAPI 3.1<span class="pipe">·</span>
-              11 tools <code>ami.*</code>
+              {tool_count} tools <code>ami.*</code>
             </div>
           </div>
         </div>
