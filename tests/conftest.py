@@ -88,6 +88,7 @@ def reset_state(ami_api_module):
     state.get("sms_messages", {}).clear()
     state.get("calls", {}).clear()
     state.get("webhooks", {}).clear()
+    state.get("kyc_verifications", {}).clear()
     # Reset del telco adapter para que los tests no compartan estado entre sí.
     import ami_telco
     ami_telco.reset_active_adapter()

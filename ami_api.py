@@ -28,6 +28,8 @@ import ami_pitch
 import ami_sandbox
 import ami_status
 import ami_security_page
+import ami_kyc
+import ami_kyc_admin
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
@@ -105,6 +107,10 @@ STATE = {
     # Lista de dicts {id, name, email, company, use_case, context, created_at,
     # ip, user_agent}. Persiste en SQLite igual que el resto.
     "waitlist": [],
+    # KYC verifications: verificación humana del representante legal antes
+    # de generar contrato. kyc_id -> dict (ver ami_kyc.py para schema).
+    # Indexado también por token público (en lookup, no como dict propio).
+    "kyc_verifications": {},
 }
 
 # Carga del STATE persistido (SQLite). Si AMI_DB_PATH no existe, arranca en
@@ -145,10 +151,10 @@ API_KEY = os.environ.get("AMI_API_KEY") or None
 ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist")
-PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+)$")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
+PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/v1/admin/customers", "/v1/waitlist")
-PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate))$")
+PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/[^/]+/(verify|reject))$")
 
 # Cache del install.sh leído del disco al arrancar.
 _INSTALL_SH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "install.sh")
@@ -1074,17 +1080,19 @@ def respond_text(handler, status, text, content_type="text/plain; charset=utf-8"
 class _BodyTooLarge(Exception): pass
 
 
-def read_json(handler):
-    """Lee y deserializa el body JSON. Aplica un cap de MAX_BODY_BYTES para
-    evitar DoS de memoria por Content-Length gigante."""
+def read_json(handler, max_bytes: int | None = None):
+    """Lee y deserializa el body JSON. Aplica un cap (por defecto
+    MAX_BODY_BYTES) para evitar DoS de memoria por Content-Length gigante.
+    Endpoints concretos pueden pedir un cap mayor (e.g. KYC sube imágenes)."""
+    cap = max_bytes if max_bytes is not None else MAX_BODY_BYTES
     try:
         n = int(handler.headers.get("Content-Length", "0") or 0)
     except ValueError:
         raise ValueError("invalid Content-Length")
     if n <= 0:
         return {}
-    if n > MAX_BODY_BYTES:
-        raise _BodyTooLarge(f"body exceeds MAX_BODY_BYTES ({n} > {MAX_BODY_BYTES})")
+    if n > cap:
+        raise _BodyTooLarge(f"body exceeds cap ({n} > {cap})")
     raw = handler.rfile.read(n)
     return json.loads(raw.decode())
 
@@ -6549,7 +6557,13 @@ def render_openapi():
             "/v1/offers/{id}/accept":                     {"post": {"summary": "Aceptar oferta", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
             "/v1/customers":                              {"post": {"summary": "Crear cliente suelto", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}}}},
             "/v1/customers/{id}":                         {"get":  {"summary": "Obtener cliente", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
-            "/v1/contracts":                              {"post": {"summary": "Crear contrato + signature_url", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}}}},
+            "/v1/contracts":                              {"post": {"summary": "Crear contrato + signature_url", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}, "409": {"description": "kyc_required (si AMI_KYC_REQUIRED=1)"}}}},
+            "/v1/sim-requests/{id}/kyc/initiate":         {"post": {"summary": "Disparar verificación humana (KYC) del rep. legal", "tags": ["Contratación · KYC"], "responses": {"201": {"description": "Created (token + verification_url)"}, "200": {"description": "Existing KYC reused"}, "409": {"description": "customer_data_missing"}}}},
+            "/kyc/{token}":                               {"get":  {"summary": "Página pública para que el humano suba DNI + selfie", "tags": ["Contratación · KYC"], "security": [], "responses": {"200": {"description": "HTML"}, "404": {"description": "kyc_not_found"}}}},
+            "/kyc/{token}/submit":                        {"post": {"summary": "Recibe imágenes base64 desde el form público", "tags": ["Contratación · KYC"], "security": [], "responses": {"200": {"description": "Submitted"}, "400": {"description": "dni_front_required / *_too_large / *_invalid_format"}, "409": {"description": "kyc_already_submitted"}}}},
+            "/v1/admin/kyc":                              {"get":  {"summary": "Admin: listar KYCs (auth: AMI_ADMIN_KEY)", "tags": ["Admin · KYC"], "responses": {"200": {"description": "OK"}, "401": {"description": "unauthorized_admin"}}}},
+            "/v1/admin/kyc/{id}/verify":                  {"post": {"summary": "Admin: marcar KYC como verified", "tags": ["Admin · KYC"], "responses": {"200": {"description": "Verified"}, "401": {"description": "unauthorized_admin"}, "404": {"description": "kyc_not_found"}}}},
+            "/v1/admin/kyc/{id}/reject":                  {"post": {"summary": "Admin: rechazar KYC con motivo", "tags": ["Admin · KYC"], "responses": {"200": {"description": "Rejected"}, "401": {"description": "unauthorized_admin"}, "404": {"description": "kyc_not_found"}}}},
             "/v1/contracts/{id}":                         {"get":  {"summary": "Obtener contrato", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
             "/v1/contracts/{id}/mock-sign":               {"post": {"summary": "Firma directa (atajo programático)", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
             "/v1/sign/{id}":                              {"get":  {"summary": "Página HTML de firma", "tags": ["Contratación"], "security": [], "responses": {"200": {"description": "HTML"}}}},
@@ -6871,6 +6885,48 @@ class Handler(BaseHTTPRequestHandler):
             if not check_admin_auth(self):
                 return response(self, 401, {"error": "unauthorized_admin"})
             return response(self, 200, {"entries": ami_waitlist.list_waitlist_entries()})
+
+        # KYC público — el humano abre la URL desde su email/SMS.
+        m = re.match(r"^/kyc/([^/]+)$", p)
+        if m:
+            token = m.group(1)
+            kyc = next((k for k in STATE["kyc_verifications"].values()
+                        if k.get("token") == token), None)
+            if not kyc:
+                return respond_html(self, 404, ami_kyc.render_kyc_not_found())
+            customer = STATE["customers"].get(kyc.get("customer_id")) or {}
+            return respond_html(self, 200, ami_kyc.render_kyc_form(kyc, customer))
+
+        # Admin: listar KYCs pendientes de revisión humana.
+        if p == "/v1/admin/kyc":
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            include_imgs = "include_images=1" in (urlparse(self.path).query or "")
+            entries = [ami_kyc.kyc_summary(k, include_images=include_imgs)
+                       for k in STATE["kyc_verifications"].values()]
+            entries.sort(key=lambda k: k.get("created_at") or "", reverse=True)
+            return response(self, 200, {"kycs": entries, "count": len(entries)})
+
+        # Panel HTML para que el operador revise visualmente. Acepta admin auth
+        # por Bearer o por ?key= (para abrir desde el navegador en la demo).
+        if p == "/panel/kyc":
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(self.path).query or "")
+            key_in_query = (qs.get("key") or [None])[0]
+            authed = check_admin_auth(self) or (
+                ADMIN_KEY is not None and key_in_query is not None
+                and secrets.compare_digest(key_in_query, ADMIN_KEY)
+            )
+            if not authed:
+                return respond_html(self, 401,
+                    "<html><body style='font-family:sans-serif;background:#06060a;color:#ededf2;padding:3rem;text-align:center'>"
+                    "<h2>401 · admin auth requerido</h2>"
+                    "<p>Abre <code>/panel/kyc?key=&lt;AMI_ADMIN_KEY&gt;</code> o usa Bearer.</p>"
+                    "</body></html>")
+            entries = [ami_kyc.kyc_summary(k, include_images=True)
+                       for k in STATE["kyc_verifications"].values()]
+            entries.sort(key=lambda k: k.get("created_at") or "", reverse=True)
+            return respond_html(self, 200, ami_kyc_admin.render_admin_kyc_list(entries))
 
         # Panel del cliente: auth por cookie ami-panel-token (httpOnly, sólo
         # validable comparando contra AMI_API_KEY).
@@ -7207,6 +7263,106 @@ class Handler(BaseHTTPRequestHandler):
             contract = body if code == 200 else body["contract"]
             return respond_html(self, 200, render_sign_page(contract))
 
+        # KYC público — el humano sube las imágenes desde /kyc/{token}.
+        m = re.match(r"^/kyc/([^/]+)/submit$", p)
+        if m:
+            token = m.group(1)
+            kyc = next((k for k in STATE["kyc_verifications"].values()
+                        if k.get("token") == token), None)
+            if not kyc:
+                return response(self, 404, {"error": "kyc_not_found"})
+            if kyc.get("status") != "pending":
+                return response(self, 409, {"error": "kyc_already_submitted",
+                                             "status": kyc.get("status")})
+            try: data = read_json(self, max_bytes=20_000_000)  # 3 imágenes × ~5.4 MB
+            except Exception as e:
+                return response(self, 400, {"error": "invalid_json", "detail": str(e)})
+            ok, reason = ami_kyc.submit_images(
+                kyc,
+                dni_front_b64=data.get("dni_front_b64"),
+                dni_back_b64=data.get("dni_back_b64"),
+                selfie_b64=data.get("selfie_b64"),
+            )
+            if not ok:
+                return response(self, 400, {"error": reason})
+            event("kyc_submitted", "kyc_verification", kyc["id"],
+                  {"sim_request_id": kyc["sim_request_id"]})
+            return response(self, 200, ami_kyc.kyc_summary(kyc))
+
+        # KYC admin: verify / reject (auth: AMI_ADMIN_KEY).
+        m = re.match(r"^/v1/admin/kyc/([^/]+)/(verify|reject)$", p)
+        if m:
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            kyc_id, action = m.group(1), m.group(2)
+            kyc = STATE["kyc_verifications"].get(kyc_id)
+            if not kyc:
+                return response(self, 404, {"error": "kyc_not_found"})
+            try: data = read_json(self)
+            except Exception: data = {}
+            if action == "verify":
+                kyc["status"] = "verified"
+                kyc["verified_at"] = now()
+                kyc["reviewer"] = data.get("reviewer") or "admin"
+                event("kyc_verified", "kyc_verification", kyc_id,
+                      {"reviewer": kyc["reviewer"]})
+                ami_webhooks.dispatch_event("kyc.verified",
+                                             kyc.get("account_id") or "",
+                                             {"kyc_id": kyc_id,
+                                              "sim_request_id": kyc["sim_request_id"]})
+            else:
+                kyc["status"] = "rejected"
+                kyc["rejection_reason"] = data.get("reason") or "no_reason_specified"
+                kyc["reviewer"] = data.get("reviewer") or "admin"
+                event("kyc_rejected", "kyc_verification", kyc_id,
+                      {"reason": kyc["rejection_reason"]})
+            return response(self, 200, ami_kyc.kyc_summary(kyc))
+
+        # KYC initiate: el agente lo dispara tras customer-data, AMI genera
+        # el token y devuelve la URL pública para que el customer la envíe al
+        # representante legal por email/SMS/WhatsApp.
+        m = re.match(r"^/v1/sim-requests/([^/]+)/kyc/initiate$", p)
+        if m:
+            req = STATE["sim_requests"].get(m.group(1))
+            if not req or not _scoped(req, _request_account_id(self)):
+                return response(self, 404, {"error": "sim_request_not_found"})
+            customer_id = req.get("customer_id")
+            customer = STATE["customers"].get(customer_id or "")
+            if not customer:
+                return response(self, 409, {"error": "customer_data_missing",
+                                             "detail": "submit customer-data first"})
+            # Evitar duplicados: si ya hay un KYC pending/submitted para esta
+            # sim_request, devolverlo en lugar de crear uno nuevo.
+            existing = next((k for k in STATE["kyc_verifications"].values()
+                             if k.get("sim_request_id") == req["id"]
+                             and k.get("status") in ("pending", "submitted", "in_review", "verified")), None)
+            if existing:
+                base = (os.environ.get("AMI_PUBLIC_URL") or "http://localhost:8000").rstrip("/")
+                return response(self, 200, {
+                    "kyc_id": existing["id"],
+                    "status": existing["status"],
+                    "verification_url": f"{base}/kyc/{existing['token']}",
+                    "rep_email": existing.get("rep_email"),
+                    "already_existed": True,
+                })
+            kyc = ami_kyc.new_verification(
+                sim_request_id=req["id"],
+                customer_id=customer_id,
+                account_id=req.get("account_id"),
+                rep_email=customer.get("billing_email", ""),
+            )
+            STATE["kyc_verifications"][kyc["id"]] = kyc
+            event("kyc_initiated", "kyc_verification", kyc["id"],
+                  {"sim_request_id": req["id"], "rep_email": kyc["rep_email"]})
+            base = (os.environ.get("AMI_PUBLIC_URL") or "http://localhost:8000").rstrip("/")
+            return response(self, 201, {
+                "kyc_id": kyc["id"],
+                "status": "pending",
+                "verification_url": f"{base}/kyc/{kyc['token']}",
+                "rep_email": kyc["rep_email"],
+                "expires_at_note": "Sin expiración explícita en v1; gestionamos por flujo.",
+            })
+
         # Waitlist público: cualquiera puede apuntarse desde /waitlist o el
         # form embebido en la landing. Validación + anti-spam dentro del módulo.
         if p == "/v1/waitlist":
@@ -7374,6 +7530,20 @@ class Handler(BaseHTTPRequestHandler):
             if offer["status"] != "offer_accepted":
                 return response(self, 409, {"error": "offer_not_accepted", "status": offer["status"]})
             req = STATE["sim_requests"].get(offer["sim_request_id"])
+            # Bloqueo KYC: si el modo KYC está activo (AMI_KYC_REQUIRED=1), se
+            # exige un KYC verified vinculado a esta sim_request antes de
+            # generar contrato. Default: deshabilitado para no romper el
+            # flujo existente; se activa cuando esté la pieza humana operativa.
+            if os.environ.get("AMI_KYC_REQUIRED") == "1" and req:
+                kyc = next((k for k in STATE["kyc_verifications"].values()
+                            if k.get("sim_request_id") == req["id"]), None)
+                if not kyc:
+                    return response(self, 409, {"error": "kyc_required",
+                        "detail": "POST /v1/sim-requests/{id}/kyc/initiate primero"})
+                if kyc.get("status") != "verified":
+                    return response(self, 409, {"error": "kyc_not_verified",
+                        "kyc_status": kyc.get("status"),
+                        "kyc_id": kyc["id"]})
             # Si el cliente fue creado por POST /v1/customers (no por /customer-data),
             # vincularlo aquí y avanzar la SIMRequest al estado intermedio.
             if req and req["status"] == "offer_accepted":
