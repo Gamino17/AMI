@@ -232,9 +232,14 @@ def test_contract_allowed_when_gate_disabled(client, accepted_offer_with_custome
 
 # ─────────────────────────── panel HTML admin ───────────────────────────
 
-def test_panel_kyc_requires_auth(anon_client):
+def test_panel_kyc_shows_login_when_unauth(anon_client):
     r = anon_client.get("/panel/kyc")
-    assert r.status_code == 401
+    assert r.status_code == 200
+    # Sin auth, devuelve el form de login en vez de listar (no leakea data)
+    assert "Panel KYC" in r.text and "<form" in r.text
+    assert 'name="key"' in r.text
+    # No debe haber tarjetas de KYC ni datos sensibles
+    assert "data-status=" not in r.text
 
 
 def test_panel_kyc_renders_when_authed_via_query(client, anon_client, accepted_offer_with_customer, admin_headers):
@@ -247,3 +252,114 @@ def test_panel_kyc_renders_when_authed_via_query(client, anon_client, accepted_o
     assert "Panel KYC" in r.text
     assert "Verificar" in r.text  # botón visible para status=submitted
     assert "data:image/jpeg;base64," in r.text  # preview inline
+
+
+# ─────────────────────────── login / cookie ───────────────────────────
+
+def test_panel_kyc_login_rejects_bad_key(anon_client, admin_headers):
+    r = anon_client.post("/panel/kyc/login",
+                         data={"key": "wrong", "reviewer": "daniel"})
+    assert r.status_code == 401
+    assert "incorrecta" in r.text.lower()
+
+
+def test_panel_kyc_login_rejects_missing_reviewer(anon_client, admin_headers):
+    r = anon_client.post("/panel/kyc/login",
+                         data={"key": "admin_test_key", "reviewer": ""})
+    assert r.status_code == 400
+
+
+def test_panel_kyc_login_sets_cookie_and_redirects(server_url, admin_headers):
+    import httpx
+    with httpx.Client(base_url=server_url, follow_redirects=False, timeout=5) as c:
+        r = c.post("/panel/kyc/login", data={"key": "admin_test_key", "reviewer": "daniel"})
+    assert r.status_code == 303
+    assert r.headers.get("location") == "/panel/kyc"
+    cookies = r.headers.get_list("set-cookie")
+    assert any("ami-kyc-admin=admin_test_key" in c for c in cookies)
+    assert any("ami-kyc-reviewer=daniel" in c for c in cookies)
+    assert all("HttpOnly" in c for c in cookies)
+
+
+def test_panel_kyc_cookie_grants_access(server_url, client, anon_client, accepted_offer_with_customer, admin_headers):
+    import httpx
+    token = _token_from(client, accepted_offer_with_customer["sim_request_id"])
+    anon_client.post(f"/kyc/{token}/submit", json={"dni_front_b64": _TINY_JPEG_B64})
+    with httpx.Client(base_url=server_url, cookies={"ami-kyc-admin": "admin_test_key"}, timeout=5) as c:
+        r = c.get("/panel/kyc")
+        assert r.status_code == 200 and "data-status=" in r.text
+        # Y las rutas REST también aceptan la cookie
+        r = c.get("/v1/admin/kyc")
+        assert r.status_code == 200
+
+
+# ─────────────────────────── expiración + retención ───────────────────────────
+
+def test_kyc_expired_pending_blocks_submit(client, anon_client, ami_api_module, accepted_offer_with_customer):
+    from datetime import datetime, timedelta, timezone
+    token = _token_from(client, accepted_offer_with_customer["sim_request_id"])
+    # Forzamos expiración del record manipulando expires_at en STATE
+    kyc = next(k for k in ami_api_module.STATE["kyc_verifications"].values())
+    kyc["expires_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    r = anon_client.post(f"/kyc/{token}/submit", json={"dni_front_b64": _TINY_JPEG_B64})
+    assert r.status_code == 400
+    assert r.json()["error"] == "kyc_expired"
+
+
+def test_kyc_expired_pending_renders_caducado(client, anon_client, ami_api_module, accepted_offer_with_customer):
+    from datetime import datetime, timedelta, timezone
+    token = _token_from(client, accepted_offer_with_customer["sim_request_id"])
+    kyc = next(k for k in ami_api_module.STATE["kyc_verifications"].values())
+    kyc["expires_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    r = anon_client.get(f"/kyc/{token}")
+    assert r.status_code == 200
+    assert "caducado" in r.text.lower()
+    # Y el record se marcó como expired
+    assert kyc["status"] == "expired"
+
+
+def test_kyc_purge_endpoint_runs(server_url, admin_headers, ami_api_module, client, accepted_offer_with_customer):
+    import httpx
+    from datetime import datetime, timedelta, timezone
+    _token_from(client, accepted_offer_with_customer["sim_request_id"])
+    kyc = next(k for k in ami_api_module.STATE["kyc_verifications"].values())
+    kyc["expires_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    with httpx.Client(base_url=server_url, headers=admin_headers, timeout=5) as admin:
+        r = admin.post("/v1/admin/kyc/purge")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pending_expired"] == 1
+    assert kyc["status"] == "expired"
+
+
+def test_kyc_purge_unauthenticated_fails(anon_client):
+    r = anon_client.post("/v1/admin/kyc/purge")
+    assert r.status_code == 401
+
+
+def test_kyc_initiate_returns_expires_at(client, accepted_offer_with_customer):
+    r = client.post(f"/v1/sim-requests/{accepted_offer_with_customer['sim_request_id']}/kyc/initiate")
+    assert r.status_code == 201
+    body = r.json()
+    assert body.get("expires_at"), "initiate debe devolver expires_at"
+    # Debe estar 72h en el futuro (± unos minutos)
+    from datetime import datetime, timedelta, timezone
+    exp = datetime.fromisoformat(body["expires_at"])
+    now = datetime.now(timezone.utc)
+    delta = exp - now
+    assert timedelta(hours=71) < delta < timedelta(hours=73)
+
+
+# ─────────────────────────── notificación email (dev-log) ───────────────────────────
+
+def test_kyc_initiate_returns_notification_field(client, accepted_offer_with_customer, monkeypatch):
+    # Sin AMI_SMTP_HOST → modo dev-log; el initiate igual devuelve notification.
+    monkeypatch.delenv("AMI_SMTP_HOST", raising=False)
+    r = client.post(f"/v1/sim-requests/{accepted_offer_with_customer['sim_request_id']}/kyc/initiate")
+    assert r.status_code == 201
+    notif = r.json().get("notification")
+    assert notif is not None
+    assert notif["mode"] in ("dev-log", "skipped")

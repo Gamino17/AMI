@@ -1,14 +1,92 @@
 """Panel admin HTML para revisar verificaciones KYC pendientes.
 
-Se sirve en GET /panel/kyc tras autenticarse con AMI_ADMIN_KEY (Bearer en
-header — para v1 también admitimos query ?key=… para que Daniel pueda
-abrirlo directo desde el navegador en la demo).
+Se sirve en GET /panel/kyc tras autenticarse. Tres mecanismos de auth:
+
+  1. Cookie `ami-kyc-admin` (set por POST /panel/kyc/login) — preferido.
+  2. Header Authorization: Bearer <AMI_ADMIN_KEY> — para curl/scripts.
+  3. Query ?key=<AMI_ADMIN_KEY> — quick-access en demo.
 
 UX: lista de KYCs por estado, click para ver imágenes en grande,
 botones Verify / Reject que llaman a la API admin REST.
 """
 from __future__ import annotations
 import html as _html
+import os
+import secrets
+
+
+COOKIE_NAME = "ami-kyc-admin"
+
+
+def check_kyc_admin_cookie(handler, admin_key: str | None) -> bool:
+    """True si la cookie de sesión coincide con el AMI_ADMIN_KEY."""
+    if not admin_key:
+        return False
+    cookie = handler.headers.get("Cookie", "") or ""
+    for part in cookie.split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == COOKIE_NAME and v:
+            try:
+                return secrets.compare_digest(v, admin_key)
+            except (TypeError, ValueError):
+                return False
+    return False
+
+
+def render_login(error: str = "") -> str:
+    err_html = f'<div class="err">{_html.escape(error)}</div>' if error else ""
+    return f"""<!doctype html>
+<html lang="es"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AMI · Panel KYC · Login</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body {{
+    background: #06060a; color: #ededf2; font-family: "Inter", sans-serif;
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse 80% 50% at 50% 0%, rgba(139,108,255,0.10), transparent 70%), #06060a;
+  }}
+  form {{
+    width: 100%; max-width: 380px; padding: 2rem;
+    background: #0c0c14; border: 1px solid #1f1f2c; border-radius: 14px;
+  }}
+  h1 {{ margin: 0 0 0.4rem; font-size: 1.4rem; letter-spacing: -0.02em; }}
+  p.sub {{ color: #8888a0; margin: 0 0 1.6rem; font-size: 0.9rem; }}
+  label {{
+    display: block; font-family: "JetBrains Mono", monospace;
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em;
+    color: #5a5a70; margin-bottom: 0.4rem;
+  }}
+  input {{
+    width: 100%; padding: 0.75rem; background: #14141d; color: #ededf2;
+    border: 1px solid #1f1f2c; border-radius: 8px; font-family: inherit;
+    font-size: 0.95rem; margin-bottom: 1.2rem;
+  }}
+  input:focus {{ outline: none; border-color: #8b6cff; }}
+  button {{
+    width: 100%; padding: 0.85rem; border: 0; cursor: pointer;
+    background: linear-gradient(180deg,#9d80ff,#7a5cff); color: white;
+    border-radius: 8px; font-size: 0.95rem; font-weight: 600;
+  }}
+  .err {{
+    background: rgba(255,107,138,0.10); border: 1px solid rgba(255,107,138,0.3);
+    color: #ff6b8a; padding: 0.6rem 0.8rem; border-radius: 6px; margin-bottom: 1rem;
+    font-family: "JetBrains Mono", monospace; font-size: 0.82rem;
+  }}
+</style>
+</head><body>
+<form method="POST" action="/panel/kyc/login">
+  <h1>Panel KYC</h1>
+  <p class="sub">Acceso para revisores de identidad.</p>
+  {err_html}
+  <label>Tu nombre</label>
+  <input type="text" name="reviewer" required autofocus placeholder="daniel">
+  <label>Admin key</label>
+  <input type="password" name="key" required>
+  <button type="submit">Entrar</button>
+</form>
+</body></html>"""
 
 
 def render_admin_kyc_list(kycs: list[dict]) -> str:
@@ -196,24 +274,35 @@ _PAGE = """<!doctype html>
       <button class="filter" data-filter="submitted">Pendientes</button>
       <button class="filter" data-filter="verified">Verificados</button>
       <button class="filter" data-filter="rejected">Rechazados</button>
+      <button class="filter" data-filter="expired">Caducados</button>
+      <form method="POST" action="/panel/kyc/logout" style="display:inline;margin-left:0.5rem;">
+        <button class="filter" type="submit" title="Salir">salir</button>
+      </form>
     </div>
   </div>
   <main id="grid">{{BODY}}</main>
   <div class="lightbox" id="lightbox" onclick="this.classList.remove('show')"><img id="lightboxImg"></div>
 
 <script>
-function adminKey() {
-  var qs = new URLSearchParams(location.search);
-  return qs.get('key') || prompt('AMI_ADMIN_KEY (Bearer):');
+// Lee la cookie ami-kyc-reviewer (no httpOnly readable desde JS sería el patrón
+// normal; aquí está como httpOnly. Como fallback pedimos por prompt UNA vez y
+// lo memorizamos en sessionStorage para no molestar al revisor en cada acción).
+function reviewerName() {
+  var n = sessionStorage.getItem('ami-kyc-reviewer');
+  if (!n) {
+    n = prompt('Tu nombre (queda en esta sesión):') || 'admin';
+    sessionStorage.setItem('ami-kyc-reviewer', n);
+  }
+  return n;
 }
 
 async function verifyKyc(id) {
-  var reviewer = prompt('Nombre del revisor:', 'daniel');
-  if (!reviewer) return;
+  if (!confirm('¿Verificar KYC ' + id + '?')) return;
   var r = await fetch('/v1/admin/kyc/' + id + '/verify', {
     method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + adminKey(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reviewer: reviewer }),
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer: reviewerName() }),
   });
   if (r.ok) location.reload();
   else alert('Error: ' + r.status + ' ' + await r.text());
@@ -222,11 +311,11 @@ async function verifyKyc(id) {
 async function rejectKyc(id) {
   var reason = prompt('Motivo del rechazo:');
   if (!reason) return;
-  var reviewer = prompt('Nombre del revisor:', 'daniel');
   var r = await fetch('/v1/admin/kyc/' + id + '/reject', {
     method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + adminKey(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reason: reason, reviewer: reviewer }),
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: reason, reviewer: reviewerName() }),
   });
   if (r.ok) location.reload();
   else alert('Error: ' + r.status + ' ' + await r.text());

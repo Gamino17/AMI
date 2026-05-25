@@ -50,6 +50,7 @@ from concurrent.futures import ThreadPoolExecutor
 SUPPORTED_EVENTS = {
     "sms.inbound", "sms.delivered", "sms.failed",
     "call.inbound", "call.completed", "call.failed",
+    "kyc.submitted", "kyc.verified", "kyc.rejected", "kyc.expired",
 }
 
 WEBHOOK_AUTO_DISABLE_THRESHOLD = 10  # tras este nº de fallos consecutivos, off.

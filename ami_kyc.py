@@ -56,18 +56,42 @@ con un proveedor KYC externo (sin nombrar marcas).
 """
 from __future__ import annotations
 import secrets
+from datetime import datetime, timedelta, timezone
 
 
 # Tamaño máximo de cada imagen (base64). 4 MB → ~5.4 MB en base64.
 MAX_IMAGE_B64_BYTES = 5_500_000
 
-ALLOWED_STATUSES = {"pending", "submitted", "in_review", "verified", "rejected"}
+ALLOWED_STATUSES = {"pending", "submitted", "in_review", "verified", "rejected", "expired"}
+
+# Política de retención y caducidad.
+TOKEN_TTL_HOURS = 72         # link inservible tras 72h sin submit
+IMAGE_RETENTION_DAYS = 90    # borrar imágenes 90 días tras submitted/verified (RGPD)
+REJECTED_RECORD_TTL_DAYS = 30  # records rechazados → record y archivos fuera a los 30 días
+
+
+def _now_dt():
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt) -> str:
+    return dt.isoformat()
+
+
+def _parse_iso(s: str | None):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
 
 
 def new_verification(sim_request_id: str, customer_id: str,
                       account_id: str | None, rep_email: str) -> dict:
     """Construye un KYC verification record. No lo persiste — el caller decide."""
-    from ami_api import new_id, now
+    from ami_api import new_id
+    now_dt = _now_dt()
     return {
         "id": new_id("kyc"),
         "token": secrets.token_urlsafe(32),
@@ -77,18 +101,30 @@ def new_verification(sim_request_id: str, customer_id: str,
         "rep_email": rep_email,
         "status": "pending",
         "rejection_reason": None,
-        "dni_front_b64": None,
-        "dni_back_b64": None,
-        "selfie_b64": None,
-        "created_at": now(),
+        # Las imágenes ya no van inline en el record — se guardan vía
+        # ami_kyc_storage en filesystem. Aquí marcamos flags y ruta lógica.
+        "image_paths": {"dni_front": None, "dni_back": None, "selfie": None},
+        "created_at": _iso(now_dt),
+        "expires_at": _iso(now_dt + timedelta(hours=TOKEN_TTL_HOURS)),
         "submitted_at": None,
         "verified_at": None,
+        "rejected_at": None,
+        "images_purged_at": None,
         "reviewer": None,
     }
 
 
+def is_expired(kyc: dict) -> bool:
+    """True si el token expiró sin que se subiera nada todavía."""
+    if kyc.get("status") not in ("pending",):
+        return False
+    exp = _parse_iso(kyc.get("expires_at"))
+    return exp is not None and _now_dt() > exp
+
+
 def kyc_summary(kyc: dict, include_images: bool = False) -> dict:
     """Vista pública sin imágenes pesadas (a menos que se pidan explícitamente)."""
+    paths = kyc.get("image_paths") or {}
     out = {
         "id": kyc["id"],
         "sim_request_id": kyc.get("sim_request_id"),
@@ -98,28 +134,35 @@ def kyc_summary(kyc: dict, include_images: bool = False) -> dict:
         "status": kyc.get("status"),
         "rejection_reason": kyc.get("rejection_reason"),
         "created_at": kyc.get("created_at"),
+        "expires_at": kyc.get("expires_at"),
         "submitted_at": kyc.get("submitted_at"),
         "verified_at": kyc.get("verified_at"),
+        "rejected_at": kyc.get("rejected_at"),
+        "images_purged_at": kyc.get("images_purged_at"),
         "reviewer": kyc.get("reviewer"),
-        "has_dni_front": bool(kyc.get("dni_front_b64")),
-        "has_dni_back":  bool(kyc.get("dni_back_b64")),
-        "has_selfie":    bool(kyc.get("selfie_b64")),
+        "has_dni_front": bool(paths.get("dni_front")),
+        "has_dni_back":  bool(paths.get("dni_back")),
+        "has_selfie":    bool(paths.get("selfie")),
     }
     if include_images:
-        out["dni_front_b64"] = kyc.get("dni_front_b64")
-        out["dni_back_b64"]  = kyc.get("dni_back_b64")
-        out["selfie_b64"]    = kyc.get("selfie_b64")
+        import ami_kyc_storage
+        out["dni_front_b64"] = ami_kyc_storage.read_image(kyc["id"], "dni_front")
+        out["dni_back_b64"]  = ami_kyc_storage.read_image(kyc["id"], "dni_back")
+        out["selfie_b64"]    = ami_kyc_storage.read_image(kyc["id"], "selfie")
     return out
 
 
 def submit_images(kyc: dict, dni_front_b64: str | None,
                    dni_back_b64: str | None,
                    selfie_b64: str | None) -> tuple[bool, str | None]:
-    """Valida y guarda las imágenes. Devuelve (ok, reason)."""
+    """Valida las imágenes, las escribe a filesystem y actualiza el record."""
+    import ami_kyc_storage
     from ami_api import now
+    if is_expired(kyc):
+        return False, "kyc_expired"
     if not dni_front_b64:
         return False, "dni_front_required"
-    # Validación de tamaño (base64 raw cap)
+    # Validación de tamaño + formato
     for label, img in (("dni_front", dni_front_b64),
                        ("dni_back", dni_back_b64),
                        ("selfie", selfie_b64)):
@@ -127,12 +170,68 @@ def submit_images(kyc: dict, dni_front_b64: str | None,
             return False, f"{label}_too_large"
         if img and not _looks_like_b64(img):
             return False, f"{label}_invalid_format"
-    kyc["dni_front_b64"] = dni_front_b64
-    kyc["dni_back_b64"]  = dni_back_b64
-    kyc["selfie_b64"]    = selfie_b64
+    # Escritura en filesystem (paths van al record)
+    paths = kyc.setdefault("image_paths", {})
+    paths["dni_front"] = ami_kyc_storage.write_image(kyc["id"], "dni_front", dni_front_b64)
+    paths["dni_back"]  = ami_kyc_storage.write_image(kyc["id"], "dni_back", dni_back_b64) if dni_back_b64 else None
+    paths["selfie"]    = ami_kyc_storage.write_image(kyc["id"], "selfie", selfie_b64) if selfie_b64 else None
     kyc["status"] = "submitted"
     kyc["submitted_at"] = now()
     return True, None
+
+
+def purge_expired(state: dict) -> dict:
+    """Aplica políticas de retención sobre todos los KYCs del state.
+
+    Devuelve un resumen con qué se hizo. Idempotente — seguro de llamar en loop.
+    """
+    import ami_kyc_storage
+    from ami_api import now
+    now_dt = _now_dt()
+    pending_expired = 0
+    images_purged = 0
+    rejected_dropped = 0
+    bucket = state.get("kyc_verifications") or {}
+    for kid in list(bucket.keys()):
+        k = bucket[kid]
+        st = k.get("status")
+        # 1) pending caducados: marcar como expired y borrar (no hay imágenes)
+        if st == "pending" and is_expired(k):
+            k["status"] = "expired"
+            pending_expired += 1
+        # 2) imágenes de verified > 90 días → purga, conservar metadata
+        if st == "verified" and not k.get("images_purged_at"):
+            v = _parse_iso(k.get("verified_at"))
+            if v and (now_dt - v) >= timedelta(days=IMAGE_RETENTION_DAYS):
+                ami_kyc_storage.delete_all_for(kid)
+                paths = k.setdefault("image_paths", {})
+                for kind in ("dni_front", "dni_back", "selfie"):
+                    paths[kind] = None
+                k["images_purged_at"] = now()
+                images_purged += 1
+        # 3) rejected > 30 días → drop archivos + record entero
+        if st == "rejected":
+            r = _parse_iso(k.get("rejected_at") or k.get("submitted_at"))
+            if r and (now_dt - r) >= timedelta(days=REJECTED_RECORD_TTL_DAYS):
+                ami_kyc_storage.delete_all_for(kid)
+                del bucket[kid]
+                rejected_dropped += 1
+        # 4) submitted sin revisar > 30 días → mismo que rejected (cliente abandonó)
+        elif st == "submitted":
+            s = _parse_iso(k.get("submitted_at"))
+            if s and (now_dt - s) >= timedelta(days=REJECTED_RECORD_TTL_DAYS):
+                ami_kyc_storage.delete_all_for(kid)
+                paths = k.setdefault("image_paths", {})
+                for kind in ("dni_front", "dni_back", "selfie"):
+                    paths[kind] = None
+                k["images_purged_at"] = now()
+                images_purged += 1
+    return {
+        "pending_expired": pending_expired,
+        "images_purged": images_purged,
+        "rejected_dropped": rejected_dropped,
+        "ran_at": now(),
+    }
 
 
 def _looks_like_b64(s: str) -> bool:
@@ -316,6 +415,15 @@ def render_kyc_form(kyc: dict, customer: dict | None) -> str:
             <h2>No hemos podido verificarlo</h2>
             <p style="color: var(--ink-soft);">Motivo: <strong>{reason}</strong></p>
             <p style="color: var(--ink-soft);">Contacta con tu agente o con soporte para reintentarlo.</p>
+          </div>
+        """
+    elif status == "expired" or is_expired(kyc):
+        body = f"""
+          <div class="kyc-success">
+            <div class="kyc-state-pill rejected">caducado</div>
+            <h2>El enlace ha caducado</h2>
+            <p style="color: var(--ink-soft);">Este enlace de verificación ya no es válido.
+            Pide a tu agente o al equipo de Parallax IEI que te envíe uno nuevo.</p>
           </div>
         """
     else:

@@ -30,6 +30,8 @@ import ami_status
 import ami_security_page
 import ami_kyc
 import ami_kyc_admin
+import ami_kyc_storage
+import ami_notify
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
@@ -153,8 +155,8 @@ ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
 PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
-PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/v1/admin/customers", "/v1/waitlist")
-PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/[^/]+/(verify|reject))$")
+PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/waitlist")
+PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/kyc/[^/]+/(verify|reject))$")
 
 # Cache del install.sh leído del disco al arrancar.
 _INSTALL_SH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "install.sh")
@@ -514,6 +516,27 @@ def check_admin_auth(handler):
         return False
     auth = handler.headers.get("Authorization", "")
     return auth.startswith("Bearer ") and secrets.compare_digest(auth[7:], ADMIN_KEY)
+
+
+def check_kyc_admin_auth(handler):
+    """Auth para endpoints KYC admin. Acepta Bearer, cookie de sesión
+    (set por POST /panel/kyc/login) o query ?key= para demos. El JS del
+    panel envía cookie automáticamente, por eso lo aceptamos aquí."""
+    if check_admin_auth(handler):
+        return True
+    if ADMIN_KEY is None:
+        return False
+    if ami_kyc_admin.check_kyc_admin_cookie(handler, ADMIN_KEY):
+        return True
+    try:
+        from urllib.parse import parse_qs
+        qs = parse_qs(urlparse(handler.path).query or "")
+        key_q = (qs.get("key") or [None])[0]
+        if key_q is not None and secrets.compare_digest(key_q, ADMIN_KEY):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 # ----- Scoped agent tokens (Nivel 2 de auth) -------------------------
@@ -6564,6 +6587,10 @@ def render_openapi():
             "/v1/admin/kyc":                              {"get":  {"summary": "Admin: listar KYCs (auth: AMI_ADMIN_KEY)", "tags": ["Admin · KYC"], "responses": {"200": {"description": "OK"}, "401": {"description": "unauthorized_admin"}}}},
             "/v1/admin/kyc/{id}/verify":                  {"post": {"summary": "Admin: marcar KYC como verified", "tags": ["Admin · KYC"], "responses": {"200": {"description": "Verified"}, "401": {"description": "unauthorized_admin"}, "404": {"description": "kyc_not_found"}}}},
             "/v1/admin/kyc/{id}/reject":                  {"post": {"summary": "Admin: rechazar KYC con motivo", "tags": ["Admin · KYC"], "responses": {"200": {"description": "Rejected"}, "401": {"description": "unauthorized_admin"}, "404": {"description": "kyc_not_found"}}}},
+            "/v1/admin/kyc/purge":                        {"post": {"summary": "Admin: ejecutar purga de KYCs caducados (cron manual)", "tags": ["Admin · KYC"], "responses": {"200": {"description": "Purge result"}, "401": {"description": "unauthorized_admin"}}}},
+            "/panel/kyc":                                 {"get":  {"summary": "Panel HTML para revisión humana de KYCs (cookie/Bearer/query auth)", "tags": ["Admin · KYC"], "security": [], "responses": {"200": {"description": "HTML"}}}},
+            "/panel/kyc/login":                           {"post": {"summary": "Panel KYC: login (form, set-cookie)", "tags": ["Admin · KYC"], "security": [], "responses": {"303": {"description": "Redirect to /panel/kyc"}, "401": {"description": "bad key"}}}},
+            "/panel/kyc/logout":                          {"post": {"summary": "Panel KYC: logout (clear cookie)", "tags": ["Admin · KYC"], "security": [], "responses": {"303": {"description": "Redirect"}}}},
             "/v1/contracts/{id}":                         {"get":  {"summary": "Obtener contrato", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
             "/v1/contracts/{id}/mock-sign":               {"post": {"summary": "Firma directa (atajo programático)", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
             "/v1/sign/{id}":                              {"get":  {"summary": "Página HTML de firma", "tags": ["Contratación"], "security": [], "responses": {"200": {"description": "HTML"}}}},
@@ -6894,12 +6921,16 @@ class Handler(BaseHTTPRequestHandler):
                         if k.get("token") == token), None)
             if not kyc:
                 return respond_html(self, 404, ami_kyc.render_kyc_not_found())
+            # Lazy-expire: si está pending y caducó el TTL, marcamos antes
+            # de renderizar para que el submit también lo bloquee coherente.
+            if kyc.get("status") == "pending" and ami_kyc.is_expired(kyc):
+                kyc["status"] = "expired"
             customer = STATE["customers"].get(kyc.get("customer_id")) or {}
             return respond_html(self, 200, ami_kyc.render_kyc_form(kyc, customer))
 
         # Admin: listar KYCs pendientes de revisión humana.
         if p == "/v1/admin/kyc":
-            if not check_admin_auth(self):
+            if not check_kyc_admin_auth(self):
                 return response(self, 401, {"error": "unauthorized_admin"})
             include_imgs = "include_images=1" in (urlparse(self.path).query or "")
             entries = [ami_kyc.kyc_summary(k, include_images=include_imgs)
@@ -6907,22 +6938,11 @@ class Handler(BaseHTTPRequestHandler):
             entries.sort(key=lambda k: k.get("created_at") or "", reverse=True)
             return response(self, 200, {"kycs": entries, "count": len(entries)})
 
-        # Panel HTML para que el operador revise visualmente. Acepta admin auth
-        # por Bearer o por ?key= (para abrir desde el navegador en la demo).
+        # Panel HTML para que el operador revise visualmente. Cookie,
+        # Bearer o ?key= como métodos de auth.
         if p == "/panel/kyc":
-            from urllib.parse import parse_qs
-            qs = parse_qs(urlparse(self.path).query or "")
-            key_in_query = (qs.get("key") or [None])[0]
-            authed = check_admin_auth(self) or (
-                ADMIN_KEY is not None and key_in_query is not None
-                and secrets.compare_digest(key_in_query, ADMIN_KEY)
-            )
-            if not authed:
-                return respond_html(self, 401,
-                    "<html><body style='font-family:sans-serif;background:#06060a;color:#ededf2;padding:3rem;text-align:center'>"
-                    "<h2>401 · admin auth requerido</h2>"
-                    "<p>Abre <code>/panel/kyc?key=&lt;AMI_ADMIN_KEY&gt;</code> o usa Bearer.</p>"
-                    "</body></html>")
+            if not check_kyc_admin_auth(self):
+                return respond_html(self, 200, ami_kyc_admin.render_login())
             entries = [ami_kyc.kyc_summary(k, include_images=True)
                        for k in STATE["kyc_verifications"].values()]
             entries.sort(key=lambda k: k.get("created_at") or "", reverse=True)
@@ -7263,6 +7283,38 @@ class Handler(BaseHTTPRequestHandler):
             contract = body if code == 200 else body["contract"]
             return respond_html(self, 200, render_sign_page(contract))
 
+        # Panel KYC admin: login / logout (cookie httpOnly).
+        if p == "/panel/kyc/login":
+            form = read_form(self)
+            key = form.get("key") or ""
+            reviewer = (form.get("reviewer") or "").strip()
+            if not ADMIN_KEY or not key or not secrets.compare_digest(key, ADMIN_KEY):
+                return respond_html(self, 401, ami_kyc_admin.render_login("Admin key incorrecta"))
+            if not reviewer:
+                return respond_html(self, 400, ami_kyc_admin.render_login("Falta el nombre del revisor"))
+            # Cookie httpOnly + Secure (si AMI_PUBLIC_URL es https). SameSite=Strict.
+            secure = "; Secure" if (os.environ.get("AMI_PUBLIC_URL", "").startswith("https://")) else ""
+            self.send_response(303)
+            self.send_header("Location", "/panel/kyc")
+            self.send_header("Set-Cookie",
+                f"{ami_kyc_admin.COOKIE_NAME}={key}; HttpOnly; Path=/; SameSite=Strict; Max-Age=28800{secure}")
+            self.send_header("Set-Cookie",
+                f"ami-kyc-reviewer={reviewer}; HttpOnly; Path=/; SameSite=Strict; Max-Age=28800{secure}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        if p == "/panel/kyc/logout":
+            self.send_response(303)
+            self.send_header("Location", "/panel/kyc")
+            self.send_header("Set-Cookie",
+                f"{ami_kyc_admin.COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0")
+            self.send_header("Set-Cookie",
+                "ami-kyc-reviewer=; HttpOnly; Path=/; Max-Age=0")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         # KYC público — el humano sube las imágenes desde /kyc/{token}.
         m = re.match(r"^/kyc/([^/]+)/submit$", p)
         if m:
@@ -7287,12 +7339,26 @@ class Handler(BaseHTTPRequestHandler):
                 return response(self, 400, {"error": reason})
             event("kyc_submitted", "kyc_verification", kyc["id"],
                   {"sim_request_id": kyc["sim_request_id"]})
+            ami_webhooks.dispatch_event("kyc.submitted",
+                                         kyc.get("account_id") or "",
+                                         {"kyc_id": kyc["id"],
+                                          "sim_request_id": kyc["sim_request_id"]})
+            ami_notify.send_kyc_submitted_to_ops(kyc)
             return response(self, 200, ami_kyc.kyc_summary(kyc))
+
+        # KYC admin: purge manual (auth: AMI_ADMIN_KEY). Útil para forzar
+        # la limpieza desde un cron externo o desde el panel sin esperar al
+        # daemon de cada hora.
+        if p == "/v1/admin/kyc/purge":
+            if not check_kyc_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            result = ami_kyc.purge_expired(STATE)
+            return response(self, 200, result)
 
         # KYC admin: verify / reject (auth: AMI_ADMIN_KEY).
         m = re.match(r"^/v1/admin/kyc/([^/]+)/(verify|reject)$", p)
         if m:
-            if not check_admin_auth(self):
+            if not check_kyc_admin_auth(self):
                 return response(self, 401, {"error": "unauthorized_admin"})
             kyc_id, action = m.group(1), m.group(2)
             kyc = STATE["kyc_verifications"].get(kyc_id)
@@ -7310,12 +7376,19 @@ class Handler(BaseHTTPRequestHandler):
                                              kyc.get("account_id") or "",
                                              {"kyc_id": kyc_id,
                                               "sim_request_id": kyc["sim_request_id"]})
+                ami_notify.send_kyc_verified_to_human(kyc)
             else:
                 kyc["status"] = "rejected"
                 kyc["rejection_reason"] = data.get("reason") or "no_reason_specified"
                 kyc["reviewer"] = data.get("reviewer") or "admin"
+                kyc["rejected_at"] = now()
                 event("kyc_rejected", "kyc_verification", kyc_id,
                       {"reason": kyc["rejection_reason"]})
+                ami_webhooks.dispatch_event("kyc.rejected",
+                                             kyc.get("account_id") or "",
+                                             {"kyc_id": kyc_id,
+                                              "reason": kyc["rejection_reason"]})
+                ami_notify.send_kyc_rejected_to_human(kyc)
             return response(self, 200, ami_kyc.kyc_summary(kyc))
 
         # KYC initiate: el agente lo dispara tras customer-data, AMI genera
@@ -7355,12 +7428,15 @@ class Handler(BaseHTTPRequestHandler):
             event("kyc_initiated", "kyc_verification", kyc["id"],
                   {"sim_request_id": req["id"], "rep_email": kyc["rep_email"]})
             base = (os.environ.get("AMI_PUBLIC_URL") or "http://localhost:8000").rstrip("/")
+            verification_url = f"{base}/kyc/{kyc['token']}"
+            notify_result = ami_notify.send_kyc_invitation(kyc, customer, verification_url)
             return response(self, 201, {
                 "kyc_id": kyc["id"],
                 "status": "pending",
-                "verification_url": f"{base}/kyc/{kyc['token']}",
+                "verification_url": verification_url,
                 "rep_email": kyc["rep_email"],
-                "expires_at_note": "Sin expiración explícita en v1; gestionamos por flujo.",
+                "expires_at": kyc["expires_at"],
+                "notification": notify_result,
             })
 
         # Waitlist público: cualquiera puede apuntarse desde /waitlist o el
@@ -7756,6 +7832,23 @@ class Handler(BaseHTTPRequestHandler):
         return response(self, 404, {"error": "unknown_route", "path": p})
 
 
+def _kyc_purge_loop():
+    """Cron daemon: corre purge_expired cada hora. Borra imágenes vencidas
+    y records caducados según política RGPD. Se arranca en __main__ no
+    durante import (los tests no lo quieren corriendo)."""
+    import time
+    interval = int(os.environ.get("AMI_KYC_PURGE_INTERVAL_S") or 3600)
+    while True:
+        try:
+            time.sleep(interval)
+            with STATE_LOCK:
+                result = ami_kyc.purge_expired(STATE)
+            if any(result[k] for k in ("pending_expired", "images_purged", "rejected_dropped")):
+                print(f"AMI kyc-purge: {result}")
+        except Exception as e:
+            print(f"AMI kyc-purge ERROR: {e}")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
     if API_KEY is None:
@@ -7763,4 +7856,5 @@ if __name__ == "__main__":
     else:
         print("AMI: auth enabled (Bearer AMI_API_KEY required)")
     print(f"AMI mock API listening on :{port}")
+    threading.Thread(target=_kyc_purge_loop, daemon=True, name="ami-kyc-purge").start()
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
