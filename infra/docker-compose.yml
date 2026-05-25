@@ -89,6 +89,7 @@ services:
       - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
       - ./asterisk/ari.conf:/etc/asterisk/ari.conf:ro
       - ./asterisk/http.conf:/etc/asterisk/http.conf:ro
+      - ./asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
       - ./asterisk/scripts:/var/lib/asterisk/scripts:ro
     environment:
       SIP_TRUNK_HOST: ${SIP_TRUNK_HOST}
