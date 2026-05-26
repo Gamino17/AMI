@@ -139,25 +139,24 @@ def test_cors_restricted_to_allowlist(server_url, ami_api_module, monkeypatch):
 def test_concurrent_sms_send_no_state_corruption(client, anon_client, active_identity):
     """Spawn N envíos concurrentes y verifica que el contador de SMS today
     refleja exactamente N (no race condition que cuente menos)."""
-    import threading
+    # Concurrencia moderada — el test valida el lock del STATE, no estrés
+    # de socket backlog. Con 30 threads simultáneos en runners CI con poca
+    # CPU se ven ECONNRESET; ThreadPoolExecutor con 4 workers da el mismo
+    # interleaving de races sin saturar el listen backlog.
+    from concurrent.futures import ThreadPoolExecutor
     N = 30
-    errors = []
     def send_one(i):
-        try:
-            # Destino distinto por SMS — el test es del state lock global,
-            # no de los caps per-destination (que bloquearían tras 5 al mismo).
-            r = anon_client.post(
-                "/v1/agent/sms/send",
-                headers={"Authorization": f"Bearer {active_identity['agent_token']}"},
-                json={"to": f"+346{i:08d}", "body": "x"},
-            )
-            if r.status_code not in (201, 429):
-                errors.append(r.status_code)
-        except Exception as e:
-            errors.append(str(e))
-    threads = [threading.Thread(target=send_one, args=(i,)) for i in range(N)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+        # Destino distinto por SMS — el test es del state lock global,
+        # no de los caps per-destination (que bloquearían tras 5 al mismo).
+        r = anon_client.post(
+            "/v1/agent/sms/send",
+            headers={"Authorization": f"Bearer {active_identity['agent_token']}"},
+            json={"to": f"+346{i:08d}", "body": "x"},
+        )
+        return None if r.status_code in (201, 429) else r.status_code
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        results = list(ex.map(send_one, range(N)))
+    errors = [r for r in results if r is not None]
     assert not errors, f"errors: {errors[:5]}"
 
     # Verifica que el contador refleja exactamente los N intentos

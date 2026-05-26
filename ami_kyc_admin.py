@@ -299,7 +299,8 @@ function reviewerName() {
 // Lee el CSRF token (cookie NO-HttpOnly) y lo manda como header
 // X-CSRF-Token. Patrón double-submit-cookie estándar.
 function csrfToken() {
-  var match = document.cookie.match(/(?:^|;\s*)ami-kyc-csrf=([^;]+)/);
+  var re = new RegExp('(?:^|;\\\\s*)ami-kyc-csrf=([^;]+)');
+  var match = document.cookie.match(re);
   return match ? decodeURIComponent(match[1]) : '';
 }
 
