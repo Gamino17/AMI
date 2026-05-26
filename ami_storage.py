@@ -56,26 +56,93 @@ def is_enabled() -> bool:
 
 def load_state(state: dict[str, Any]) -> None:
     """Reconstruye `state` desde la DB. Mantiene las claves que ya existan
-    en state (no las pisa con vacío si la DB no tiene entrada para ellas)."""
+    en state (no las pisa con vacío si la DB no tiene entrada para ellas).
+
+    Si la DB principal está corrupta, intenta restaurar del último snapshot
+    en AMI_BACKUP_DIR antes de arrancar en blanco. Eso evita perder días de
+    state por un fsync interrumpido / disk error.
+    """
     if _MEMORY_ONLY:
         return
-    with _LOCK:
-        try:
-            conn = _connect()
-            try:
-                cur = conn.execute("SELECT key, value FROM kv")
-                rows = cur.fetchall()
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            # Si la DB está corrupta o no se puede abrir, arrancamos en blanco
-            # — preferible a crashear el proceso al arrancar.
+
+    rows = _try_load_rows()
+    if rows is None:
+        # DB corrupta. Intento de auto-failover desde último backup.
+        restored = _try_restore_from_backup()
+        if restored:
+            rows = _try_load_rows()
+        if rows is None:
+            # Sin backup viable. Arrancamos en blanco — mejor que crashear.
+            import sys as _sys
+            print("[ami_storage] DB corrupta y sin backup utilizable; arrancando en blanco",
+                  file=_sys.stderr)
             return
+
     for key, raw in rows:
         try:
             state[key] = json.loads(raw)
         except json.JSONDecodeError:
             continue
+
+
+def _try_load_rows() -> list[tuple] | None:
+    """Lee la DB e intenta parsear. Devuelve filas o None si no se puede."""
+    with _LOCK:
+        try:
+            conn = _connect()
+            try:
+                # PRAGMA integrity_check da "ok" si la DB está sana. Sin esto
+                # SELECT puede funcionar parcialmente sobre DB corrupta.
+                cur = conn.execute("PRAGMA integrity_check")
+                check = cur.fetchone()
+                if not check or check[0] != "ok":
+                    return None
+                cur = conn.execute("SELECT key, value FROM kv")
+                return cur.fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+
+
+def _try_restore_from_backup() -> bool:
+    """Si AMI_BACKUP_DIR tiene snapshots, restaura el más reciente sobre la
+    DB principal (renombrando la corrupta a .corrupt). Devuelve True si
+    restauró algo."""
+    import sys as _sys
+    backup_dir = os.environ.get("AMI_BACKUP_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "backups"
+    )
+    if not os.path.isdir(backup_dir):
+        return False
+    try:
+        snapshots = sorted(
+            n for n in os.listdir(backup_dir)
+            if n.startswith("ami_state.") and n.endswith(".db")
+        )
+    except OSError:
+        return False
+    if not snapshots:
+        return False
+
+    latest = os.path.join(backup_dir, snapshots[-1])
+    # Renombramos la corrupta para preservar evidencia y forensics.
+    corrupt_path = _DB_PATH + ".corrupt"
+    try:
+        if os.path.exists(_DB_PATH):
+            os.replace(_DB_PATH, corrupt_path)
+        import shutil
+        shutil.copy2(latest, _DB_PATH)
+        try:
+            os.chmod(_DB_PATH, 0o600)
+        except OSError:
+            pass
+        print(f"[ami_storage] AUTOFAILOVER: restaurado {latest} sobre {_DB_PATH} "
+              f"(DB corrupta preservada en {corrupt_path})", file=_sys.stderr)
+        return True
+    except (OSError, IOError) as e:
+        print(f"[ami_storage] AUTOFAILOVER falló: {e}", file=_sys.stderr)
+        return False
 
 
 def save_state(state: dict[str, Any]) -> None:

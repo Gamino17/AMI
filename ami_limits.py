@@ -42,6 +42,13 @@ DEFAULT_LIMITS = {
     "calls_per_day": 200,
     "monthly_budget_eur": 100.0,
     "allowed_country_prefixes": ["+34"],   # España por defecto; ampliar al alta
+    # Protección anti-spam por destinatario: un cliente con bug no puede
+    # saturar el mismo número y hacer que el SBC del partner nos capen el
+    # trunk. Si excede esto, devolvemos sms_destination_limit_exceeded.
+    "sms_per_destination_per_hour": 5,
+    "sms_per_destination_per_day": 20,
+    "calls_per_destination_per_hour": 3,
+    "calls_per_destination_per_day": 10,
 }
 
 
@@ -59,6 +66,9 @@ def new_usage() -> dict:
         "calls_count_today": 0,
         "calls_minutes_this_month": 0.0,
         "spend_this_month_eur": 0.0,
+        # Por destinatario: {<msisdn>: {"sms_h": N, "sms_d": N, "calls_h": N, "calls_d": N}}.
+        # Se limpian junto con los counters globales en _maybe_reset.
+        "per_destination": {},
         "last_reset_at_hour": n.isoformat(),
         "last_reset_at_day": n.isoformat(),
         "last_reset_at_month": n.isoformat(),
@@ -84,10 +94,16 @@ def _maybe_reset(usage: dict) -> None:
     if hour_marker.replace(minute=0, second=0, microsecond=0) != n.replace(minute=0, second=0, microsecond=0):
         usage["sms_count_this_hour"] = 0
         usage["calls_count_this_hour"] = 0
+        # Reset hourly counters por destino (mantenemos los daily)
+        for dest in usage.setdefault("per_destination", {}).values():
+            dest["sms_h"] = 0
+            dest["calls_h"] = 0
         usage["last_reset_at_hour"] = n.isoformat()
     if day_marker.date() != n.date():
         usage["sms_count_today"] = 0
         usage["calls_count_today"] = 0
+        # Reset diario por destino — limpiamos el dict entero (era de ayer)
+        usage["per_destination"] = {}
         usage["last_reset_at_day"] = n.isoformat()
     if (month_marker.year, month_marker.month) != (n.year, n.month):
         usage["calls_minutes_this_month"] = 0.0
@@ -100,6 +116,12 @@ def _country_allowed(limits: dict, e164: str) -> bool:
     if not allowed:    # lista vacía = bloquear todo (defensa por defecto)
         return False
     return any(e164.startswith(p) for p in allowed)
+
+
+def _dest_bucket(usage: dict, to_e164: str) -> dict:
+    """Bucket por destino dentro de usage['per_destination']."""
+    pd = usage.setdefault("per_destination", {})
+    return pd.setdefault(to_e164, {"sms_h": 0, "sms_d": 0, "calls_h": 0, "calls_d": 0})
 
 
 def check_and_charge_sms(identity: dict, to_e164: str) -> tuple[bool, str | None]:
@@ -117,9 +139,18 @@ def check_and_charge_sms(identity: dict, to_e164: str) -> tuple[bool, str | None
     if usage["spend_this_month_eur"] + PRICE_SMS_EUR > limits["monthly_budget_eur"]:
         return False, "monthly_budget_exceeded"
 
+    # Cap por destinatario (protección anti-spam → trunk del partner)
+    dest = _dest_bucket(usage, to_e164)
+    if dest["sms_h"] >= limits.get("sms_per_destination_per_hour", 5):
+        return False, "sms_destination_hourly_limit_exceeded"
+    if dest["sms_d"] >= limits.get("sms_per_destination_per_day", 20):
+        return False, "sms_destination_daily_limit_exceeded"
+
     usage["sms_count_this_hour"] += 1
     usage["sms_count_today"] += 1
     usage["spend_this_month_eur"] = round(usage["spend_this_month_eur"] + PRICE_SMS_EUR, 4)
+    dest["sms_h"] += 1
+    dest["sms_d"] += 1
     return True, None
 
 
@@ -140,8 +171,17 @@ def check_and_reserve_call(identity: dict, to_e164: str) -> tuple[bool, str | No
     if usage["spend_this_month_eur"] >= limits["monthly_budget_eur"]:
         return False, "monthly_budget_exceeded"
 
+    # Cap por destinatario
+    dest = _dest_bucket(usage, to_e164)
+    if dest["calls_h"] >= limits.get("calls_per_destination_per_hour", 3):
+        return False, "calls_destination_hourly_limit_exceeded"
+    if dest["calls_d"] >= limits.get("calls_per_destination_per_day", 10):
+        return False, "calls_destination_daily_limit_exceeded"
+
     usage["calls_count_this_hour"] += 1
     usage["calls_count_today"] += 1
+    dest["calls_h"] += 1
+    dest["calls_d"] += 1
     return True, None
 
 

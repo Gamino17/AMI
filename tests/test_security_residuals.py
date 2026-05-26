@@ -142,18 +142,20 @@ def test_concurrent_sms_send_no_state_corruption(client, anon_client, active_ide
     import threading
     N = 30
     errors = []
-    def send_one():
+    def send_one(i):
         try:
+            # Destino distinto por SMS — el test es del state lock global,
+            # no de los caps per-destination (que bloquearían tras 5 al mismo).
             r = anon_client.post(
                 "/v1/agent/sms/send",
                 headers={"Authorization": f"Bearer {active_identity['agent_token']}"},
-                json={"to": "+34611000000", "body": "x"},
+                json={"to": f"+346{i:08d}", "body": "x"},
             )
             if r.status_code not in (201, 429):
                 errors.append(r.status_code)
         except Exception as e:
             errors.append(str(e))
-    threads = [threading.Thread(target=send_one) for _ in range(N)]
+    threads = [threading.Thread(target=send_one, args=(i,)) for i in range(N)]
     for t in threads: t.start()
     for t in threads: t.join()
     assert not errors, f"errors: {errors[:5]}"
