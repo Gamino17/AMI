@@ -362,4 +362,42 @@ def test_kyc_initiate_returns_notification_field(client, accepted_offer_with_cus
     assert r.status_code == 201
     notif = r.json().get("notification")
     assert notif is not None
-    assert notif["mode"] in ("dev-log", "skipped")
+    # Ahora `notification` es {"email": {...}, "sms": None|{...}}
+    assert "email" in notif
+    assert notif["email"]["mode"] in ("dev-log", "skipped", "smtp")
+
+
+# ─────────────────────────── representative_phone + SMS ───────────────────────────
+
+def test_customer_data_captures_representative_phone(client, sample_customer_payload, fresh_sim_request):
+    sim_id = fresh_sim_request["sim_request"]["id"]
+    offer_id = fresh_sim_request["offer"]["id"]
+    client.post(f"/v1/offers/{offer_id}/accept")
+    payload = dict(sample_customer_payload, representative_phone="+34600111222")
+    r = client.post(f"/v1/sim-requests/{sim_id}/customer-data", json={"customer": payload})
+    assert r.status_code == 201
+    assert r.json()["customer"]["representative_phone"] == "+34600111222"
+
+
+def test_kyc_initiate_sends_sms_when_phone_provided(client, sample_customer_payload, fresh_sim_request, monkeypatch):
+    monkeypatch.delenv("AMI_KANNEL_SENDSMS_URL", raising=False)  # dev-log mode
+    sim_id = fresh_sim_request["sim_request"]["id"]
+    offer_id = fresh_sim_request["offer"]["id"]
+    client.post(f"/v1/offers/{offer_id}/accept")
+    payload = dict(sample_customer_payload, representative_phone="+34600111222")
+    client.post(f"/v1/sim-requests/{sim_id}/customer-data", json={"customer": payload})
+
+    r = client.post(f"/v1/sim-requests/{sim_id}/kyc/initiate")
+    assert r.status_code == 201
+    notif = r.json()["notification"]
+    assert notif["sms"] is not None
+    assert notif["sms"]["mode"] == "dev-log"
+    assert notif["sms"]["to"] == "+34600111222"
+
+
+def test_kyc_initiate_no_sms_when_no_phone(client, accepted_offer_with_customer):
+    # fixture base no incluye representative_phone
+    r = client.post(f"/v1/sim-requests/{accepted_offer_with_customer['sim_request_id']}/kyc/initiate")
+    assert r.status_code == 201
+    notif = r.json()["notification"]
+    assert notif["sms"] is None

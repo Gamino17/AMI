@@ -1,5 +1,6 @@
-"""Envío de emails transaccionales (KYC, en el futuro: confirmaciones de
-contrato, alertas, etc.).
+"""Envío de notificaciones transaccionales: email (SMTP) y SMS (Kannel).
+
+KYC, en el futuro: confirmaciones de contrato, alertas, etc.
 
 Usa smtplib (stdlib) — sin dependencias externas. Config por env vars:
 
@@ -30,6 +31,9 @@ import os
 import smtplib
 import ssl
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 
 
 def _smtp_configured() -> bool:
@@ -83,11 +87,59 @@ def _send_email(to: str, subject: str, html_body: str, text_body: str) -> dict:
         return {"delivered": False, "mode": "smtp", "error": str(e)}
 
 
+# ==========================  SMS via Kannel ==========================
+
+def _send_sms_via_kannel(to: str, body: str) -> dict:
+    """Manda un SMS administrativo (no asociado a un MID) directo al
+    Kannel sendsms endpoint. Útil para notificaciones de servicio (KYC link,
+    confirmaciones de contrato), donde el remitente es AMI, no un cliente.
+
+    Usa las mismas envs que el TelcoAdapter live para Kannel, más
+    `AMI_KYC_SMS_FROM` como remitente alfa-numérico/E.164.
+    """
+    if not to:
+        return {"delivered": False, "mode": "skipped", "reason": "no_recipient"}
+
+    sendsms_url = os.environ.get("AMI_KANNEL_SENDSMS_URL")
+    if not sendsms_url:
+        print(f"[ami_notify · dev-log] would SMS to={to} body={body[:60]!r}", file=sys.stderr)
+        return {"delivered": False, "mode": "dev-log", "to": to}
+
+    user = os.environ.get("AMI_KANNEL_USERNAME") or ""
+    password = os.environ.get("AMI_KANNEL_PASSWORD") or ""
+    sender = os.environ.get("AMI_KYC_SMS_FROM") or "AMI"
+
+    params = urllib.parse.urlencode({
+        "username": user,
+        "password": password,
+        "from": sender,
+        "to": to,
+        "text": body,
+    })
+    url = sendsms_url + ("&" if "?" in sendsms_url else "?") + params
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status = resp.status
+            if 200 <= status < 300:
+                return {"delivered": True, "mode": "kannel", "to": to}
+            return {"delivered": False, "mode": "kannel", "status": status}
+    except (urllib.error.URLError, OSError) as e:
+        print(f"[ami_notify · ERROR] kannel SMS failed: {e}", file=sys.stderr)
+        return {"delivered": False, "mode": "kannel", "error": str(e)}
+
+
 # ==========================  KYC ==========================
 
 def send_kyc_invitation(kyc: dict, customer: dict, verification_url: str) -> dict:
-    """Envía al rep. legal el link para subir su DNI."""
+    """Envía al rep. legal el link para subir su DNI.
+
+    Por email siempre que tengamos rep_email. Si el customer tiene también
+    `representative_phone` (ya normalizado a E.164 en /customer-data), enviamos
+    SMS de refuerzo. Devuelve un dict con los dos resultados.
+    """
     rep_email = kyc.get("rep_email") or ""
+    rep_phone = (customer or {}).get("representative_phone") or ""
     rep_name = (customer or {}).get("representative_name", "")
     legal_name = (customer or {}).get("legal_name", "tu empresa")
 
@@ -129,7 +181,19 @@ Si prefieres, copia esta URL: <code style="font-size:0.85em">{verification_url}<
 <p style="color: #888; font-size: 0.85em;">Parallax IEI · AMI Protocol —
 si no esperabas este email, ignóralo y el proceso se descartará solo.</p>
 </body></html>"""
-    return _send_email(rep_email, subject, html, text)
+    email_result = _send_email(rep_email, subject, html, text)
+
+    # SMS redundante si tenemos teléfono (E.164). Cuerpo corto, sin acentos
+    # raros, máx 160 GSM7 para no fragmentar.
+    sms_result = None
+    if rep_phone:
+        sms_body = (
+            f"AMI: para activar el numero de {legal_name[:30]} verifica tu "
+            f"identidad aqui: {verification_url} (caduca 72h)"
+        )[:320]  # 2 SMS GSM7 máx
+        sms_result = _send_sms_via_kannel(rep_phone, sms_body)
+
+    return {"email": email_result, "sms": sms_result}
 
 
 def send_kyc_verified_to_human(kyc: dict) -> dict:

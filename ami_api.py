@@ -32,6 +32,7 @@ import ami_kyc
 import ami_kyc_admin
 import ami_kyc_storage
 import ami_notify
+import ami_backup
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
@@ -156,7 +157,7 @@ ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/waitlist")
-PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/kyc/[^/]+/(verify|reject))$")
+PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject))$")
 
 # Cache del install.sh leído del disco al arrancar.
 _INSTALL_SH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "install.sh")
@@ -6784,6 +6785,7 @@ class Handler(BaseHTTPRequestHandler):
             return response(self, 200, {
                 "ok": True, "service": "ami", "time": now(),
                 "telco": get_active_adapter().health(),
+                "backup": ami_backup.stats(),
             })
         if p == "/metrics":
             # Endpoint de scrape Prometheus. Público por convención (no expone PII).
@@ -7355,6 +7357,13 @@ class Handler(BaseHTTPRequestHandler):
             result = ami_kyc.purge_expired(STATE)
             return response(self, 200, result)
 
+        # Backup manual: fuerza un snapshot atómico de la SQLite. Útil antes
+        # de un despliegue o de tocar el state.
+        if p == "/v1/admin/backup/now":
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            return response(self, 200, ami_backup.snapshot_once())
+
         # KYC admin: verify / reject (auth: AMI_ADMIN_KEY).
         m = re.match(r"^/v1/admin/kyc/([^/]+)/(verify|reject)$", p)
         if m:
@@ -7547,11 +7556,13 @@ class Handler(BaseHTTPRequestHandler):
             if missing:
                 return response(self, 400, {"error": "missing_fields", "fields": missing})
             cid = new_id("customer")
+            rep_phone = _normalize_msisdn(payload.get("representative_phone") or "")
             customer = {
                 "id": cid, "status": "created",
                 "legal_name": payload["legal_name"], "tax_id": payload["tax_id"],
                 "billing_email": payload["billing_email"], "address": payload["address"],
                 "representative_name": payload["representative_name"],
+                "representative_phone": rep_phone,
                 "created_at": now(),
                 "account_id": _request_account_id(self),
             }
@@ -7582,11 +7593,13 @@ class Handler(BaseHTTPRequestHandler):
         # Crear customer suelto (compatibilidad / casos sin SIMRequest todavía)
         if p == "/v1/customers":
             cid = new_id("customer")
+            rep_phone = _normalize_msisdn(data.get("representative_phone") or "")
             customer = {
                 "id": cid, "status": "created",
                 "legal_name": data.get("legal_name"), "tax_id": data.get("tax_id"),
                 "billing_email": data.get("billing_email"), "address": data.get("address"),
                 "representative_name": data.get("representative_name"),
+                "representative_phone": rep_phone,
                 "created_at": now(),
                 "account_id": _request_account_id(self),
             }
@@ -7857,4 +7870,5 @@ if __name__ == "__main__":
         print("AMI: auth enabled (Bearer AMI_API_KEY required)")
     print(f"AMI mock API listening on :{port}")
     threading.Thread(target=_kyc_purge_loop, daemon=True, name="ami-kyc-purge").start()
+    threading.Thread(target=ami_backup.backup_loop, daemon=True, name="ami-backup").start()
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

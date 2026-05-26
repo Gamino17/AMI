@@ -60,6 +60,74 @@ services:
       - key: AMI_ARI_TRUNK
         value: PJSIP/trunk_partner
 
+      # === Admin: panel KYC + endpoints REST admin ===
+      # Generar con `openssl rand -hex 32`. Sin esto el panel KYC y los
+      # endpoints /v1/admin/* dan 401.
+      - key: AMI_ADMIN_KEY
+        sync: false
+
+      # === KYC ===
+      # Activa el gate "no contrato sin DNI verificado" en POST /v1/contracts.
+      # En staging déjalo a "0" hasta que el equipo de ops esté listo.
+      - key: AMI_KYC_REQUIRED
+        value: "1"
+      # Dónde se escriben las imágenes de DNI. Apunta al disk persistente
+      # `ami-data` (montado en /data). El cron de purga RGPD se ocupa de
+      # borrar imágenes a los 90 días tras verified / 30 días tras rejected.
+      - key: AMI_KYC_IMAGE_DIR
+        value: /data/kyc_images
+      # Intervalo del daemon de purga (segundos). Default 3600 (1h).
+      - key: AMI_KYC_PURGE_INTERVAL_S
+        value: "3600"
+      # Remitente del SMS de invitación al KYC (alfa-numérico si Kannel
+      # lo soporta, sino E.164). Sin Kannel se ignora.
+      - key: AMI_KYC_SMS_FROM
+        value: "AMI"
+
+      # === Notificaciones por email (SMTP) ===
+      # Necesario para que el rep. legal reciba el link del KYC y los
+      # mails de verified/rejected. Sin esto, los emails quedan en dev-log
+      # (stderr del proceso) — el panel y la API siguen funcionando.
+      - key: AMI_SMTP_HOST
+        sync: false
+      - key: AMI_SMTP_PORT
+        value: "587"
+      - key: AMI_SMTP_USER
+        sync: false
+      - key: AMI_SMTP_PASSWORD
+        sync: false
+      - key: AMI_SMTP_FROM
+        sync: false       # ej. "AMI <noreply@parallax-iei.com>"
+      - key: AMI_OPS_EMAIL
+        sync: false       # bandeja del equipo de ops para nuevos KYCs
+
+      # === Persistencia ===
+      # Path de la SQLite. Apunta al disk persistente para sobrevivir reinicios.
+      - key: AMI_DB_PATH
+        value: /data/ami_state.db
+      # Backup automático: snapshot atómico de la SQLite cada N segundos.
+      # Default 1h. Los snapshots viven en /data/backups con rotación de N días.
+      - key: AMI_BACKUP_INTERVAL_S
+        value: "3600"
+      - key: AMI_BACKUP_DIR
+        value: /data/backups
+      - key: AMI_BACKUP_KEEP_DAYS
+        value: "7"
+
+      # === Hardening webhooks (SSRF) ===
+      # Lista de hosts a los que SÍ se permite hacer POST de webhook outbound.
+      # Quitar 127.0.0.1/localhost en producción. Si vacío, se permite todo
+      # menos las IPs privadas/link-local (default seguro).
+      - key: AMI_WEBHOOK_ALLOWED_HOSTS
+        sync: false
+    # Persistent disk: SQLite + KYC images + backups. Render Starter da 1GB
+    # por defecto; subir el plan si el volumen crece. La purga RGPD del KYC
+    # mantiene el directorio acotado (90 días retention).
+    disk:
+      name: ami-data
+      mountPath: /data
+      sizeGB: 1
+
   # ----------------------------------------------------------------------------
   # AMI MCP server vía HTTP streamable. Permite que cualquier agente conecte
   # remotamente sin instalar nada. Habla con el API por HTTP usando AMI_API_URL.
