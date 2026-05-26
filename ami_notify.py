@@ -30,10 +30,11 @@ import email.message
 import os
 import smtplib
 import ssl
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import ami_log
 
 
 def _smtp_configured() -> bool:
@@ -46,10 +47,15 @@ def _send_email(to: str, subject: str, html_body: str, text_body: str) -> dict:
         return {"delivered": False, "mode": "skipped", "reason": "no_recipient"}
 
     if not _smtp_configured():
-        # Dev-log: imprimimos a stdout para que aparezca en el log del proceso.
-        # En CI / tests esto es lo que vemos.
-        print(f"[ami_notify · dev-log] would email to={to} subject={subject!r}", file=sys.stderr)
-        print(f"[ami_notify · dev-log] body:\n{text_body[:500]}", file=sys.stderr)
+        # Dev-log: emitimos un solo evento estructurado. El body completo va
+        # truncado para no llenar logs en producción si alguien olvida SMTP.
+        ami_log.info(
+            "notify_devlog",
+            channel="email",
+            to=to,
+            subject=subject,
+            body_preview=text_body[:500],
+        )
         return {"delivered": False, "mode": "dev-log", "to": to, "subject": subject}
 
     host = os.environ["AMI_SMTP_HOST"]
@@ -83,7 +89,13 @@ def _send_email(to: str, subject: str, html_body: str, text_body: str) -> dict:
                 s.send_message(msg)
         return {"delivered": True, "mode": "smtp", "to": to}
     except (smtplib.SMTPException, OSError, ssl.SSLError) as e:
-        print(f"[ami_notify · ERROR] SMTP failed: {e}", file=sys.stderr)
+        ami_log.error(
+            "notify_send_failed",
+            channel="email",
+            to=to,
+            error=str(e),
+            exc_type=type(e).__name__,
+        )
         return {"delivered": False, "mode": "smtp", "error": str(e)}
 
 
@@ -102,7 +114,12 @@ def _send_sms_via_kannel(to: str, body: str) -> dict:
 
     sendsms_url = os.environ.get("AMI_KANNEL_SENDSMS_URL")
     if not sendsms_url:
-        print(f"[ami_notify · dev-log] would SMS to={to} body={body[:60]!r}", file=sys.stderr)
+        ami_log.info(
+            "notify_devlog",
+            channel="sms",
+            to=to,
+            body_preview=body[:60],
+        )
         return {"delivered": False, "mode": "dev-log", "to": to}
 
     user = os.environ.get("AMI_KANNEL_USERNAME") or ""
@@ -125,7 +142,13 @@ def _send_sms_via_kannel(to: str, body: str) -> dict:
                 return {"delivered": True, "mode": "kannel", "to": to}
             return {"delivered": False, "mode": "kannel", "status": status}
     except (urllib.error.URLError, OSError) as e:
-        print(f"[ami_notify · ERROR] kannel SMS failed: {e}", file=sys.stderr)
+        ami_log.error(
+            "notify_send_failed",
+            channel="sms",
+            to=to,
+            error=str(e),
+            exc_type=type(e).__name__,
+        )
         return {"delivered": False, "mode": "kannel", "error": str(e)}
 
 

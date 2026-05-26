@@ -114,6 +114,27 @@ services:
       - key: AMI_BACKUP_KEEP_DAYS
         value: "7"
 
+      # === Backup offsite a S3 (opt-in) ===
+      # Sin AMI_BACKUP_S3_BUCKET el backup vive solo en el disk persistente.
+      # Configurando bucket + credenciales, cada snapshot se sube además a S3
+      # vía SigV4 (stdlib pura, sin boto3). Compatible con S3-compatible
+      # (Backblaze B2, Wasabi, Cloudflare R2) seteando AMI_BACKUP_S3_ENDPOINT.
+      # Usar credenciales IAM con permiso s3:PutObject acotado al bucket.
+      - key: AMI_BACKUP_S3_BUCKET
+        sync: false
+      - key: AMI_BACKUP_S3_REGION
+        sync: false       # ej. "eu-west-1" (default si vacío)
+      - key: AMI_BACKUP_S3_PREFIX
+        sync: false       # ej. "ami-backups/" (default si vacío)
+      - key: AMI_BACKUP_AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AMI_BACKUP_AWS_SECRET_ACCESS_KEY
+        sync: false
+      # Opcional: endpoint custom para S3-compatible (Backblaze B2, Wasabi, R2).
+      # Ej. "https://s3.us-west-002.backblazeb2.com". Vacío = AWS S3 real.
+      - key: AMI_BACKUP_S3_ENDPOINT
+        sync: false
+
       # === Hardening webhooks (SSRF) ===
       # Lista de hosts a los que SÍ se permite hacer POST de webhook outbound.
       # Quitar 127.0.0.1/localhost en producción. Si vacío, se permite todo
