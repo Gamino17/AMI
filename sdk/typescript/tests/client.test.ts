@@ -270,6 +270,128 @@ describe("AmiClient", () => {
     ]);
   });
 
+  it("submitCustomerData forwards representativePhone as snake_case when supplied", async () => {
+    mock.on("POST", "/v1/sim-requests/simreq_1/customer-data", (req) => {
+      expect(req.body).toEqual({
+        customer: {
+          legal_name: "Acme",
+          tax_id: "B1",
+          billing_email: "a@b.c",
+          address: "Madrid",
+          representative_name: "Ada",
+          representative_phone: "+34600111222",
+        },
+      });
+      return jsonResponse(201, {
+        sim_request: { id: "simreq_1", status: "customer_data_submitted" },
+        customer: {
+          id: "customer_1",
+          status: "created",
+          legal_name: "Acme",
+          tax_id: "B1",
+          billing_email: "a@b.c",
+          address: "Madrid",
+          representative_name: "Ada",
+          representative_phone: "+34600111222",
+          created_at: "t",
+        },
+      });
+    });
+
+    const sub = await client.submitCustomerData("simreq_1", {
+      legalName: "Acme",
+      taxId: "B1",
+      billingEmail: "a@b.c",
+      address: "Madrid",
+      representativeName: "Ada",
+      representativePhone: "+34600111222",
+    });
+    expect(sub.customer.representativePhone).toBe("+34600111222");
+  });
+
+  it("submitCustomerData omits representativePhone when not provided", async () => {
+    mock.on("POST", "/v1/sim-requests/simreq_1/customer-data", (req) => {
+      const body = req.body as { customer: Record<string, unknown> };
+      expect(body.customer).not.toHaveProperty("representative_phone");
+      return jsonResponse(201, {
+        sim_request: { id: "simreq_1", status: "customer_data_submitted" },
+        customer: {
+          id: "customer_1",
+          status: "created",
+          legal_name: "Acme",
+          tax_id: "B1",
+          billing_email: "a@b.c",
+          address: "Madrid",
+          representative_name: "Ada",
+          created_at: "t",
+        },
+      });
+    });
+
+    const sub = await client.submitCustomerData("simreq_1", {
+      legalName: "Acme",
+      taxId: "B1",
+      billingEmail: "a@b.c",
+      address: "Madrid",
+      representativeName: "Ada",
+    });
+    expect(sub.customer.representativePhone).toBeUndefined();
+  });
+
+  it("initiateKyc POSTs to /v1/sim-requests/{id}/kyc/initiate and parses the typed response", async () => {
+    mock.on("POST", "/v1/sim-requests/simreq_1/kyc/initiate", (req) => {
+      expect(req.headers.authorization).toBe("Bearer ami_test_key");
+      return jsonResponse(201, {
+        kyc_id: "kyc_42",
+        status: "pending",
+        verification_url: "https://api.test/kyc/tok_abc123",
+        rep_email: "rep@acme.test",
+        expires_at: "2026-05-28T00:00:00Z",
+        notification: { email: { status: "sent" }, sms: null },
+      });
+    });
+
+    const result = await client.initiateKyc("simreq_1");
+    expect(result.kycId).toBe("kyc_42");
+    expect(result.status).toBe("pending");
+    expect(result.verificationUrl).toBe("https://api.test/kyc/tok_abc123");
+    expect(result.repEmail).toBe("rep@acme.test");
+    expect(result.expiresAt).toBe("2026-05-28T00:00:00Z");
+    expect(result.notification).toEqual({ email: { status: "sent" }, sms: null });
+    expect(result.alreadyExisted).toBeUndefined();
+  });
+
+  it("initiateKyc surfaces alreadyExisted when the KYC was reused", async () => {
+    mock.on("POST", "/v1/sim-requests/simreq_1/kyc/initiate", () =>
+      jsonResponse(200, {
+        kyc_id: "kyc_42",
+        status: "pending",
+        verification_url: "https://api.test/kyc/tok_abc123",
+        rep_email: "rep@acme.test",
+        already_existed: true,
+      }),
+    );
+
+    const result = await client.initiateKyc("simreq_1");
+    expect(result.alreadyExisted).toBe(true);
+    expect(result.kycId).toBe("kyc_42");
+  });
+
+  it("initiateKyc maps 409 customer_data_missing -> AmiConflictError", async () => {
+    mock.on("POST", "/v1/sim-requests/simreq_1/kyc/initiate", () =>
+      jsonResponse(409, {
+        error: "customer_data_missing",
+        detail: "submit customer-data first",
+      }),
+    );
+
+    await expect(client.initiateKyc("simreq_1")).rejects.toMatchObject({
+      name: "AmiConflictError",
+      statusCode: 409,
+      reason: "customer_data_missing",
+    });
+  });
+
   it("createWebhook camelizes secret prefix and exposes secret once", async () => {
     mock.on("POST", "/v1/mobile-identities/mid_1/webhooks", (req) => {
       expect(req.body).toEqual({

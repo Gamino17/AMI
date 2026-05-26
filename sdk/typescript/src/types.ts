@@ -117,6 +117,12 @@ export interface CustomerData {
   billingEmail: string;
   address: string;
   representativeName: string;
+  /**
+   * E.164 phone number of the legal representative. Optional but
+   * recommended: AMI uses it to deliver the KYC verification link by SMS
+   * in addition to the billing email.
+   */
+  representativePhone?: string;
 }
 
 export interface Customer extends CustomerData {
@@ -150,6 +156,51 @@ export interface MobileIdentity {
   esimQrUrl?: string;
   activatedAt?: string;
   inboundSipUri?: string | null;
+}
+
+/** KYC lifecycle states. */
+export type KycStatus =
+  | "pending"
+  | "submitted"
+  | "in_review"
+  | "verified"
+  | "rejected"
+  | "expired";
+
+/**
+ * Per-channel hint of the KYC invitation that AMI dispatches when the
+ * verification is initiated. The shape is intentionally loose — the SDK
+ * exposes it verbatim so callers can log or surface it without coupling
+ * to the backend's notification adapter internals.
+ */
+export interface KycNotificationStatus {
+  email?: { status: string; [key: string]: unknown } | null;
+  sms?: { status: string; [key: string]: unknown } | null;
+  [channel: string]: { status: string; [key: string]: unknown } | null | undefined;
+}
+
+/** Result of `client.initiateKyc()`. */
+export interface KycInitiationResult {
+  /** AMI-side identifier of the KYC verification record. */
+  kycId: string;
+  /** Current KYC status. Freshly initiated KYCs are `"pending"`. */
+  status: KycStatus;
+  /**
+   * Public URL where the legal representative uploads their ID + selfie.
+   * Send this to the human (email / SMS / WhatsApp / share link).
+   */
+  verificationUrl: string;
+  /** Email AMI delivered the invitation to (the customer's billing email). */
+  repEmail?: string;
+  /** ISO-8601 expiry of the verification token. */
+  expiresAt?: string;
+  /** Out-of-band notification dispatch hint (email / SMS). */
+  notification?: KycNotificationStatus | null;
+  /**
+   * `true` when a KYC for this SIM request already existed and was reused
+   * instead of creating a new one. `initiateKyc` is idempotent.
+   */
+  alreadyExisted?: boolean;
 }
 
 /** Activation response. The `agentToken` is returned ONLY on this call. */

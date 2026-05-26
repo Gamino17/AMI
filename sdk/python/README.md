@@ -114,7 +114,14 @@ cust = client.submit_customer_data(
     billing_email="billing@acme.test",
     address="Madrid, Spain",
     representative_name="Ada Lovelace",
+    representative_phone="+34600111222",  # optional: enables SMS delivery of the KYC link
 )
+
+# Trigger human KYC of the legal representative. AMI emails (and SMS, if
+# representative_phone was provided) the verification link. Idempotent.
+kyc = client.initiate_kyc(offer.sim_request_id)
+print("Send the rep to:", kyc.verification_url)  # also reachable via the email/SMS AMI sent
+
 contract = client.create_contract(offer_id=offer.id, customer_id=cust.id)
 
 # Send contract.signature_url to the human. When the page is submitted,

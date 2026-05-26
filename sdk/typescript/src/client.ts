@@ -22,6 +22,7 @@ import type {
   CreateWebhookInput,
   CustomerData,
   Customer,
+  KycInitiationResult,
   Limits,
   LimitsPatch,
   MobileIdentity,
@@ -137,6 +138,31 @@ export class AmiClient {
     return this.http.request<SubmitCustomerDataResult>(
       `/v1/sim-requests/${encodeURIComponent(simRequestId)}/customer-data`,
       { method: "POST", body: { customer } },
+    );
+  }
+
+  /**
+   * Triggers human KYC of the customer's legal representative. Must be
+   * called after `submitCustomerData()`.
+   *
+   * AMI mints a single-use verification token, stores a pending KYC
+   * record, dispatches the invitation to the representative (email — and
+   * SMS if `representativePhone` was supplied on the customer), and
+   * returns the public `verificationUrl` where the human uploads their
+   * ID + selfie.
+   *
+   * Idempotent: if a KYC for the SIM request is already in flight
+   * (`pending` / `submitted` / `in_review` / `verified`), the existing
+   * record is returned with `alreadyExisted: true`.
+   *
+   * Required before `createContract()` when the backend has
+   * `AMI_KYC_REQUIRED=1` configured. Without that flag the call is still
+   * valid (and recommended for production deployments).
+   */
+  async initiateKyc(simRequestId: string): Promise<KycInitiationResult> {
+    return this.http.request<KycInitiationResult>(
+      `/v1/sim-requests/${encodeURIComponent(simRequestId)}/kyc/initiate`,
+      { method: "POST", body: {} },
     );
   }
 

@@ -68,7 +68,13 @@ const { customer } = await client.submitCustomerData(simRequest.id, {
   billingEmail: "billing@acme.test",
   address: "Madrid, Spain",
   representativeName: "Ada Lovelace",
+  representativePhone: "+34600111222", // optional; enables SMS delivery of the KYC link
 });
+
+// Trigger human KYC of the legal representative. AMI emails (and SMS, if
+// representativePhone was provided) the verification link. Idempotent.
+const kyc = await client.initiateKyc(simRequest.id);
+console.log("Send the rep to:", kyc.verificationUrl);
 
 const contract = await client.createContract({
   offerId: offer.id,

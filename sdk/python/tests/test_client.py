@@ -14,6 +14,7 @@ from ami import (
     AmiRateLimitError,
     AmiServerError,
     AmiValidationError,
+    KycInitiationResult,
 )
 
 
@@ -121,6 +122,136 @@ def test_submit_customer_data_nests_payload(requests_mock, client, base_url):
     }
     assert cust.id == "customer_42"
     assert cust.legal_name == "Acme S.L."
+
+
+def test_submit_customer_data_includes_representative_phone_when_passed(
+    requests_mock, client, base_url
+):
+    """``representative_phone`` is optional; when provided it is forwarded."""
+    requests_mock.post(
+        f"{base_url}/v1/sim-requests/simreq_abc/customer-data",
+        status_code=201,
+        json={
+            "sim_request": {"id": "simreq_abc"},
+            "customer": {
+                "id": "customer_42",
+                "status": "created",
+                "legal_name": "Acme S.L.",
+                "tax_id": "B12345678",
+                "billing_email": "billing@acme.test",
+                "address": "Madrid, Spain",
+                "representative_name": "Ada Lovelace",
+                "representative_phone": "+34600111222",
+            },
+        },
+    )
+
+    cust = client.submit_customer_data(
+        sim_request_id="simreq_abc",
+        legal_name="Acme S.L.",
+        tax_id="B12345678",
+        billing_email="billing@acme.test",
+        address="Madrid, Spain",
+        representative_name="Ada Lovelace",
+        representative_phone="+34600111222",
+    )
+
+    body = json.loads(requests_mock.last_request.body)
+    assert body["customer"]["representative_phone"] == "+34600111222"
+    assert cust.representative_phone == "+34600111222"
+
+
+def test_submit_customer_data_omits_phone_when_not_passed(
+    requests_mock, client, base_url
+):
+    """When ``representative_phone`` is omitted, the payload must not include it."""
+    requests_mock.post(
+        f"{base_url}/v1/sim-requests/simreq_abc/customer-data",
+        status_code=201,
+        json={
+            "sim_request": {"id": "simreq_abc"},
+            "customer": {
+                "id": "customer_42",
+                "status": "created",
+                "legal_name": "Acme S.L.",
+                "tax_id": "B12345678",
+                "billing_email": "billing@acme.test",
+                "address": "Madrid, Spain",
+                "representative_name": "Ada Lovelace",
+            },
+        },
+    )
+
+    cust = client.submit_customer_data(
+        sim_request_id="simreq_abc",
+        legal_name="Acme S.L.",
+        tax_id="B12345678",
+        billing_email="billing@acme.test",
+        address="Madrid, Spain",
+        representative_name="Ada Lovelace",
+    )
+
+    body = json.loads(requests_mock.last_request.body)
+    assert "representative_phone" not in body["customer"]
+    assert cust.representative_phone is None
+
+
+def test_initiate_kyc_returns_typed_result(requests_mock, client, base_url):
+    """``initiate_kyc`` POSTs to ``/v1/sim-requests/{id}/kyc/initiate``."""
+    requests_mock.post(
+        f"{base_url}/v1/sim-requests/simreq_abc/kyc/initiate",
+        status_code=201,
+        json={
+            "kyc_id": "kyc_42",
+            "status": "pending",
+            "verification_url": "https://api.protocolami.com/kyc/tok_abc123",
+            "rep_email": "rep@acme.test",
+            "expires_at": "2026-05-28T00:00:00Z",
+            "notification": {"email": {"status": "sent"}, "sms": None},
+        },
+    )
+
+    result = client.initiate_kyc("simreq_abc")
+    assert isinstance(result, KycInitiationResult)
+    assert result.kyc_id == "kyc_42"
+    assert result.status == "pending"
+    assert result.verification_url.startswith("https://")
+    assert result.rep_email == "rep@acme.test"
+    assert result.expires_at == "2026-05-28T00:00:00Z"
+    assert result.notification == {"email": {"status": "sent"}, "sms": None}
+    assert result.already_existed is False
+
+
+def test_initiate_kyc_idempotent_returns_existing(requests_mock, client, base_url):
+    """Re-initiating an existing KYC returns the same token with ``already_existed``."""
+    requests_mock.post(
+        f"{base_url}/v1/sim-requests/simreq_abc/kyc/initiate",
+        status_code=200,
+        json={
+            "kyc_id": "kyc_42",
+            "status": "pending",
+            "verification_url": "https://api.protocolami.com/kyc/tok_abc123",
+            "rep_email": "rep@acme.test",
+            "already_existed": True,
+        },
+    )
+
+    result = client.initiate_kyc("simreq_abc")
+    assert result.already_existed is True
+    assert result.kyc_id == "kyc_42"
+
+
+def test_initiate_kyc_409_when_customer_data_missing(requests_mock, client, base_url):
+    """The backend returns 409 if customer-data has not been submitted yet."""
+    requests_mock.post(
+        f"{base_url}/v1/sim-requests/simreq_abc/kyc/initiate",
+        status_code=409,
+        json={"error": "customer_data_missing", "detail": "submit customer-data first"},
+    )
+
+    with pytest.raises(AmiConflictError) as exc:
+        client.initiate_kyc("simreq_abc")
+    assert exc.value.reason == "customer_data_missing"
 
 
 def test_activate_identity_returns_agent_token(requests_mock, client, base_url):

@@ -39,6 +39,7 @@ from .client import (
     AmiClient,
     Contract,
     Customer,
+    KycInitiationResult,
     MobileIdentity,
     Offer,
     ProvisionedCredentials,
@@ -70,6 +71,7 @@ __all__ = [
     "Contract",
     "MobileIdentity",
     "ProvisionedCredentials",
+    "KycInitiationResult",
     "WebhookCreated",
     "WebhookInfo",
     # Agent return types

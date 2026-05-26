@@ -52,6 +52,7 @@ class Customer:
     billing_email: str
     address: str
     representative_name: str
+    representative_phone: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -130,6 +131,32 @@ class ProvisionedCredentials:
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class KycInitiationResult:
+    """Result of :meth:`AmiClient.initiate_kyc`.
+
+    AMI generates a per-SIMRequest verification token and exposes a public
+    page at :attr:`verification_url` where the legal representative uploads
+    their ID + selfie. ``status`` reflects the KYC lifecycle — typically
+    ``"pending"`` on a fresh initiation; if a KYC already existed for the
+    SIMRequest, the existing record is returned and ``already_existed`` is
+    ``True``.
+
+    The backend also fires off an out-of-band notification (email / SMS)
+    to the legal representative. The :attr:`notification` field exposes
+    the per-channel delivery hint returned by the backend so the caller
+    can decide whether to resend the link manually.
+    """
+    kyc_id: str
+    status: str
+    verification_url: str
+    rep_email: Optional[str] = None
+    expires_at: Optional[str] = None
+    notification: Optional[Dict[str, Any]] = None
+    already_existed: bool = False
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -167,6 +194,20 @@ def _customer_from_dict(d: Mapping[str, Any]) -> Customer:
         billing_email=d.get("billing_email", ""),
         address=d.get("address", ""),
         representative_name=d.get("representative_name", ""),
+        representative_phone=d.get("representative_phone") or None,
+        raw=dict(d),
+    )
+
+
+def _kyc_result_from_dict(d: Mapping[str, Any]) -> "KycInitiationResult":
+    return KycInitiationResult(
+        kyc_id=d["kyc_id"],
+        status=d.get("status", ""),
+        verification_url=d.get("verification_url", ""),
+        rep_email=d.get("rep_email"),
+        expires_at=d.get("expires_at"),
+        notification=d.get("notification"),
+        already_existed=bool(d.get("already_existed", False)),
         raw=dict(d),
     )
 
@@ -324,21 +365,56 @@ class AmiClient:
         billing_email: str,
         address: str,
         representative_name: str,
+        representative_phone: Optional[str] = None,
     ) -> Customer:
         """Attach the legal/fiscal data of the contracting customer to the
-        SIMRequest. Must be called after :meth:`accept_offer`."""
+        SIMRequest. Must be called after :meth:`accept_offer`.
+
+        ``representative_phone`` is optional but recommended: AMI uses it
+        to deliver the KYC verification link by SMS in addition to email.
+        Pass a full E.164 number (e.g. ``"+34600111222"``); the backend
+        normalises it before storing.
+        """
+        customer: Dict[str, Any] = {
+            "legal_name": legal_name,
+            "tax_id": tax_id,
+            "billing_email": billing_email,
+            "address": address,
+            "representative_name": representative_name,
+        }
+        if representative_phone:
+            customer["representative_phone"] = representative_phone
         data = self._http.request(
             "POST",
             f"/v1/sim-requests/{sim_request_id}/customer-data",
-            json={"customer": {
-                "legal_name": legal_name,
-                "tax_id": tax_id,
-                "billing_email": billing_email,
-                "address": address,
-                "representative_name": representative_name,
-            }},
+            json={"customer": customer},
         )
         return _customer_from_dict(data["customer"])
+
+    def initiate_kyc(self, sim_request_id: str) -> KycInitiationResult:
+        """Trigger human KYC of the customer's legal representative.
+
+        Call this **after** :meth:`submit_customer_data`. AMI mints a
+        single-use verification token, stores a pending KYC record, fires
+        off the invitation to the representative (email — and SMS if
+        ``representative_phone`` was supplied), and returns the public
+        ``verification_url`` where the human uploads their ID + selfie.
+
+        If a KYC is already in flight (``pending`` / ``submitted`` /
+        ``in_review`` / ``verified``) for the same SIMRequest, the existing
+        record is returned and :attr:`KycInitiationResult.already_existed`
+        is ``True`` — calling :meth:`initiate_kyc` repeatedly is safe and
+        idempotent.
+
+        Required before :meth:`create_contract` when the backend has
+        ``AMI_KYC_REQUIRED=1`` configured. Without that flag the call is
+        still valid (and recommended for production deployments).
+        """
+        data = self._http.request(
+            "POST",
+            f"/v1/sim-requests/{sim_request_id}/kyc/initiate",
+        )
+        return _kyc_result_from_dict(data)
 
     def create_contract(self, *, offer_id: str, customer_id: str) -> Contract:
         """Generate the contract document. The returned :attr:`Contract.signature_url`
@@ -424,6 +500,7 @@ class AmiClient:
             billing_email=customer["billing_email"],
             address=customer["address"],
             representative_name=customer["representative_name"],
+            representative_phone=customer.get("representative_phone"),
         )
         contract = self.create_contract(offer_id=offer.id, customer_id=cust.id)
         self.mock_sign(contract.id)
@@ -592,5 +669,6 @@ __all__ = [
     "WebhookCreated",
     "WebhookInfo",
     "ProvisionedCredentials",
+    "KycInitiationResult",
     "asdict",
 ]
