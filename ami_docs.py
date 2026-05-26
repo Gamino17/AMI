@@ -459,7 +459,64 @@ def _sections() -> list[dict]:
             "group": "getting_started",
             "group_es": "Empezar", "group_en": "Get started",
             "title_es": "Quick start", "title_en": "Quick start",
-            "body": f"""
+            # Extraemos los bloques de código a variables porque contienen
+            # backslashes (`\\\n` en el ejemplo curl) y Python 3.11 prohíbe
+            # backslashes dentro de expresiones {...} de un f-string.
+            "body": (lambda
+                _qs_install=_code_block([
+                    ("Python", "pip install ami-protocol"),
+                    ("TypeScript", "npm install @ami-protocol/sdk"),
+                    ("curl", "# no install needed"),
+                ]),
+                _qs_provision=_code_block([
+                    ("Python", "from ami import AmiClient\n\n"
+                     'client = AmiClient(api_key="amik_live_...",\n'
+                     '                   base_url="https://api.protocolami.com")\n'
+                     'creds = client.provision_number(country="ES", customer={\n'
+                     '    "legal_name": "Acme S.L.", "tax_id": "B12345678",\n'
+                     '    "billing_email": "billing@acme.test",\n'
+                     '    "address": "Madrid, Spain",\n'
+                     '    "representative_name": "Ada Lovelace",\n'
+                     '})\n\n'
+                     'agent = client.as_agent(creds.agent_token)\n'
+                     'agent.send_sms(to="+34600...", body="Hello from my agent")\n'
+                     'print(f"Number: {creds.phone_number}")\n'
+                     'print(f"Token (save it!): {creds.agent_token[:20]}...")'),
+                    ("TypeScript",
+                     'import { AmiClient } from "@ami-protocol/sdk";\n\n'
+                     'const client = new AmiClient({\n'
+                     '  apiKey: process.env.AMI_API_KEY!,\n'
+                     '  baseUrl: "https://api.protocolami.com",\n'
+                     '});\n\n'
+                     'const creds = await client.provisionNumber({\n'
+                     '  country: "ES",\n'
+                     '  customer: {\n'
+                     '    legalName: "Acme S.L.", taxId: "B12345678",\n'
+                     '    billingEmail: "billing@acme.test",\n'
+                     '    address: "Madrid, Spain",\n'
+                     '    representativeName: "Ada Lovelace",\n'
+                     '  },\n'
+                     '});\n\n'
+                     'const agent = client.asAgent(creds.agentToken);\n'
+                     'await agent.sendSms({ to: "+34600...", body: "Hello from my agent" });'),
+                    ("curl",
+                     "# 1) request + offer\n"
+                     'curl -X POST https://api.protocolami.com/v1/sim-requests \\\n'
+                     '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
+                     '  -H "Content-Type: application/json" \\\n'
+                     '  -d \'{"country":"ES"}\'\n\n'
+                     "# 2-5) accept offer / customer-data / contract / mock-sign\n"
+                     "# 6) activate → returns agent_token ONCE\n"
+                     'curl -X POST https://api.protocolami.com/v1/mobile-identities/activate \\\n'
+                     '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
+                     '  -d \'{"contract_id":"contract_..."}\'\n\n'
+                     "# 7) send SMS using the agent_token\n"
+                     'curl -X POST https://api.protocolami.com/v1/agent/sms/send \\\n'
+                     '  -H "Authorization: Bearer $AGENT_TOKEN" \\\n'
+                     '  -d \'{"to":"+34600...","body":"Hello"}\''),
+                ]),
+                _qs_try=_tryit("/v1/demo/quick", "Ejecutar demo", "Run demo", method="POST"),
+            : f"""
               <h1>Quick start</h1>
               <p data-lang="es">
                 Obtén un número de teléfono real y envía tu primer SMS con cinco
@@ -474,61 +531,11 @@ def _sections() -> list[dict]:
 
               <h2 data-lang="es">1. Instala el SDK</h2>
               <h2 data-lang="en">1. Install the SDK</h2>
-              {_code_block([
-                ("Python", "pip install ami-protocol"),
-                ("TypeScript", "npm install @ami-protocol/sdk"),
-                ("curl", "# no install needed"),
-              ])}
+              {_qs_install}
 
               <h2 data-lang="es">2. Provisiona un número + envía un SMS</h2>
               <h2 data-lang="en">2. Provision a number + send an SMS</h2>
-              {_code_block([
-                ("Python", "from ami import AmiClient\n\n"
-                 'client = AmiClient(api_key="amik_live_...",\n'
-                 '                   base_url="https://api.protocolami.com")\n'
-                 'creds = client.provision_number(country="ES", customer={\n'
-                 '    "legal_name": "Acme S.L.", "tax_id": "B12345678",\n'
-                 '    "billing_email": "billing@acme.test",\n'
-                 '    "address": "Madrid, Spain",\n'
-                 '    "representative_name": "Ada Lovelace",\n'
-                 '})\n\n'
-                 'agent = client.as_agent(creds.agent_token)\n'
-                 'agent.send_sms(to="+34600...", body="Hello from my agent")\n'
-                 'print(f"Number: {creds.phone_number}")\n'
-                 'print(f"Token (save it!): {creds.agent_token[:20]}...")'),
-                ("TypeScript",
-                 'import { AmiClient } from "@ami-protocol/sdk";\n\n'
-                 'const client = new AmiClient({\n'
-                 '  apiKey: process.env.AMI_API_KEY!,\n'
-                 '  baseUrl: "https://api.protocolami.com",\n'
-                 '});\n\n'
-                 'const creds = await client.provisionNumber({\n'
-                 '  country: "ES",\n'
-                 '  customer: {\n'
-                 '    legalName: "Acme S.L.", taxId: "B12345678",\n'
-                 '    billingEmail: "billing@acme.test",\n'
-                 '    address: "Madrid, Spain",\n'
-                 '    representativeName: "Ada Lovelace",\n'
-                 '  },\n'
-                 '});\n\n'
-                 'const agent = client.asAgent(creds.agentToken);\n'
-                 'await agent.sendSms({ to: "+34600...", body: "Hello from my agent" });'),
-                ("curl",
-                 "# 1) request + offer\n"
-                 'curl -X POST https://api.protocolami.com/v1/sim-requests \\\n'
-                 '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
-                 '  -H "Content-Type: application/json" \\\n'
-                 '  -d \'{"country":"ES"}\'\n\n'
-                 "# 2-5) accept offer / customer-data / contract / mock-sign\n"
-                 "# 6) activate → returns agent_token ONCE\n"
-                 'curl -X POST https://api.protocolami.com/v1/mobile-identities/activate \\\n'
-                 '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
-                 '  -d \'{"contract_id":"contract_..."}\'\n\n'
-                 "# 7) send SMS using the agent_token\n"
-                 'curl -X POST https://api.protocolami.com/v1/agent/sms/send \\\n'
-                 '  -H "Authorization: Bearer $AGENT_TOKEN" \\\n'
-                 '  -d \'{"to":"+34600...","body":"Hello"}\''),
-              ])}
+              {_qs_provision}
 
               <h2 data-lang="es">3. Pruébalo ahora</h2>
               <h2 data-lang="en">3. Try it now</h2>
@@ -542,8 +549,8 @@ def _sections() -> list[dict]:
                 and runs the full flow against the mock backend. Useful to see
                 the shape of responses without an API key.
               </p>
-              {_tryit("/v1/demo/quick", "Ejecutar demo", "Run demo", method="POST")}
-            """,
+              {_qs_try}
+            """)(),
         },
 
         # ===== CONCEPTOS =====
@@ -657,7 +664,13 @@ def _sections() -> list[dict]:
             "group": "core",
             "group_es": "Core", "group_en": "Core",
             "title_es": "Autenticación", "title_en": "Authentication",
-            "body": f"""
+            "body": (lambda
+                _block1=_code_block([
+                    ("curl", "curl -X POST https://api.protocolami.com/v1/mobile-identities/$MID/rotate-token \\\n  -H \"Authorization: Bearer $AMI_API_KEY\""),
+                    ("Python", "client.rotate_agent_token(mid)"),
+                    ("TypeScript", "await client.rotateAgentToken(mid);"),
+                ]),
+            : f"""
               <h1 data-lang="es">Autenticación</h1>
               <h1 data-lang="en">Authentication</h1>
 
@@ -723,11 +736,7 @@ def _sections() -> list[dict]:
               <p data-lang="en">
                 If you suspect an agent_token leak, hard-rotate with:
               </p>
-              {_code_block([
-                ("curl", "curl -X POST https://api.protocolami.com/v1/mobile-identities/$MID/rotate-token \\\n  -H \"Authorization: Bearer $AMI_API_KEY\""),
-                ("Python", "client.rotate_agent_token(mid)"),
-                ("TypeScript", "await client.rotateAgentToken(mid);"),
-              ])}
+              {_block1}
               <p data-lang="es">
                 El token anterior queda invalidado al instante. La respuesta
                 trae el nuevo agent_token en plano (única vez).
@@ -736,7 +745,7 @@ def _sections() -> list[dict]:
                 The previous token is invalidated instantly. The response
                 returns the new agent_token in plaintext (one time only).
               </p>
-            """,
+            """)(),
         },
 
         # ===== CONTRACTING =====
@@ -745,7 +754,53 @@ def _sections() -> list[dict]:
             "group": "core",
             "group_es": "Core", "group_en": "Core",
             "title_es": "Flujo de contratación", "title_en": "Contracting flow",
-            "body": f"""
+            "body": (lambda
+                _block1=_code_block([
+                    ("curl", "curl -X POST https://api.protocolami.com/v1/sim-requests \\\n"
+                     '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
+                     '  -H "Content-Type: application/json" \\\n'
+                     "  -d '{\"country\":\"ES\",\"sim_type\":\"eSIM\",\"capabilities\":[\"sms\",\"voice\"]}'"),
+                    ("Python", 'sim = client.request_number(country="ES",\n'
+                     '                              capabilities=["sms","voice"],\n'
+                     '                              agent_name="agent01")\n'
+                     "offer_id = sim.id  # OfferAccepted.id"),
+                    ("TypeScript", "const { simRequest, offer } = await client.requestNumber({\n"
+                     '  country: "ES", capabilities: ["sms","voice"], agentName: "agent01",\n'
+                     "});"),
+                ]),
+                _block2=_code_block([
+                    ("curl", "curl -X POST https://api.protocolami.com/v1/offers/$OFFER_ID/accept \\\n  -H \"Authorization: Bearer $AMI_API_KEY\""),
+                    ("Python", "client.accept_offer(offer.id)"),
+                    ("TypeScript", "await client.acceptOffer(offer.id);"),
+                ]),
+                _block3=_code_block([
+                    ("curl",
+                     "curl -X POST https://api.protocolami.com/v1/sim-requests/$SIM_ID/customer-data \\\n"
+                     '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
+                     "  -d '" + json_dumps({
+                       "customer": {
+                         "legal_name": "Acme S.L.", "tax_id": "B12345678",
+                         "billing_email": "billing@acme.test",
+                         "address": "Madrid, Spain",
+                         "representative_name": "Ada Lovelace",
+                       }
+                     }) + "'"),
+                    ("Python", 'customer = client.submit_customer_data(\n'
+                     '    sim_request_id=sim.sim_request_id,\n'
+                     '    legal_name="Acme S.L.", tax_id="B12345678",\n'
+                     '    billing_email="billing@acme.test",\n'
+                     '    address="Madrid, Spain",\n'
+                     '    representative_name="Ada Lovelace",\n'
+                     ')'),
+                ]),
+                _block4=_code_block([
+                    ("Python", '''contract = client.create_contract(offer_id=offer.id, customer_id=customer.id)
+client.mock_sign(contract.id)  # o abrir contract.signature_url en navegador
+identity = client.activate_identity(contract.id)
+# identity.agent_token disponible AQUÍ — una sola vez
+print(identity.phone_number, identity.agent_token)'''),
+                ]),
+            : f"""
               <h1 data-lang="es">Flujo de contratación</h1>
               <h1 data-lang="en">Contracting flow</h1>
               <p class="lead" data-lang="es">
@@ -760,48 +815,13 @@ def _sections() -> list[dict]:
               </p>
 
               <h2>1. SIMRequest + Offer</h2>
-              {_code_block([
-                ("curl", "curl -X POST https://api.protocolami.com/v1/sim-requests \\\n"
-                 '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
-                 '  -H "Content-Type: application/json" \\\n'
-                 "  -d '{\"country\":\"ES\",\"sim_type\":\"eSIM\",\"capabilities\":[\"sms\",\"voice\"]}'"),
-                ("Python", 'sim = client.request_number(country="ES",\n'
-                 '                              capabilities=["sms","voice"],\n'
-                 '                              agent_name="agent01")\n'
-                 "offer_id = sim.id  # OfferAccepted.id"),
-                ("TypeScript", "const { simRequest, offer } = await client.requestNumber({\n"
-                 '  country: "ES", capabilities: ["sms","voice"], agentName: "agent01",\n'
-                 "});"),
-              ])}
+              {_block1}
 
               <h2>2. Accept offer</h2>
-              {_code_block([
-                ("curl", "curl -X POST https://api.protocolami.com/v1/offers/$OFFER_ID/accept \\\n  -H \"Authorization: Bearer $AMI_API_KEY\""),
-                ("Python", "client.accept_offer(offer.id)"),
-                ("TypeScript", "await client.acceptOffer(offer.id);"),
-              ])}
+              {_block2}
 
               <h2>3. Customer data</h2>
-              {_code_block([
-                ("curl",
-                 "curl -X POST https://api.protocolami.com/v1/sim-requests/$SIM_ID/customer-data \\\n"
-                 '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
-                 "  -d '" + json_dumps({
-                   "customer": {
-                     "legal_name": "Acme S.L.", "tax_id": "B12345678",
-                     "billing_email": "billing@acme.test",
-                     "address": "Madrid, Spain",
-                     "representative_name": "Ada Lovelace",
-                   }
-                 }) + "'"),
-                ("Python", 'customer = client.submit_customer_data(\n'
-                 '    sim_request_id=sim.sim_request_id,\n'
-                 '    legal_name="Acme S.L.", tax_id="B12345678",\n'
-                 '    billing_email="billing@acme.test",\n'
-                 '    address="Madrid, Spain",\n'
-                 '    representative_name="Ada Lovelace",\n'
-                 ')'),
-              ])}
+              {_block3}
 
               <h2>4. Contract → 5. Sign → 6. Activate</h2>
               <p data-lang="es">
@@ -820,13 +840,7 @@ def _sections() -> list[dict]:
                 programmatic shortcut. Then <code>POST /v1/mobile-identities/activate</code>
                 returns the active MID with the <em>agent_token</em> in plaintext.
               </p>
-              {_code_block([
-                ("Python", '''contract = client.create_contract(offer_id=offer.id, customer_id=customer.id)
-client.mock_sign(contract.id)  # o abrir contract.signature_url en navegador
-identity = client.activate_identity(contract.id)
-# identity.agent_token disponible AQUÍ — una sola vez
-print(identity.phone_number, identity.agent_token)'''),
-              ])}
+              {_block4}
 
               <h2 data-lang="es">Atajo todo-en-uno</h2>
               <h2 data-lang="en">One-shot helper</h2>
@@ -838,7 +852,7 @@ print(identity.phone_number, identity.agent_token)'''),
                 The SDKs expose <code>provision_number()</code> which runs all
                 6 steps in a single call and returns <code>{{mid, phone, agent_token}}</code>.
               </p>
-            """,
+            """)(),
         },
 
         # ===== SMS =====
@@ -847,7 +861,24 @@ print(identity.phone_number, identity.agent_token)'''),
             "group": "operations",
             "group_es": "Operations", "group_en": "Operations",
             "title_es": "SMS", "title_en": "SMS",
-            "body": f"""
+            "body": (lambda
+                _block1=_code_block([
+                    ("Python", 'agent.send_sms(to="+34611000000", body="Hello")'),
+                    ("TypeScript", 'await agent.sendSms({ to: "+34611000000", body: "Hello" });'),
+                    ("curl",
+                     'curl -X POST https://api.protocolami.com/v1/agent/sms/send \\\n'
+                     '  -H "Authorization: Bearer $AGENT_TOKEN" \\\n'
+                     "  -d '" + json_dumps({"to": "+34611000000", "body": "Hello"}) + "'"),
+                    ("MCP", 'ami.send_sms(to="+34611000000", body="Hello")'),
+                ]),
+                _block2=_code_block([
+                    ("Python", '''msgs = agent.list_sms(limit=20, direction="outbound")
+for m in msgs:
+    print(m.id, m.status, m.body)'''),
+                    ("curl", '''curl "https://api.protocolami.com/v1/agent/sms?limit=20&direction=outbound" \\
+  -H "Authorization: Bearer $AGENT_TOKEN"'''),
+                ]),
+            : f"""
               <h1 data-lang="es">SMS</h1>
               <h1 data-lang="en">SMS</h1>
 
@@ -863,25 +894,11 @@ print(identity.phone_number, identity.agent_token)'''),
                 the SMSC's DLR (or the mock simulator in dev) takes it through
                 <code>sent</code> and then <code>delivered</code>.
               </p>
-              {_code_block([
-                ("Python", 'agent.send_sms(to="+34611000000", body="Hello")'),
-                ("TypeScript", 'await agent.sendSms({ to: "+34611000000", body: "Hello" });'),
-                ("curl",
-                 'curl -X POST https://api.protocolami.com/v1/agent/sms/send \\\n'
-                 '  -H "Authorization: Bearer $AGENT_TOKEN" \\\n'
-                 "  -d '" + json_dumps({"to": "+34611000000", "body": "Hello"}) + "'"),
-                ("MCP", 'ami.send_sms(to="+34611000000", body="Hello")'),
-              ])}
+              {_block1}
 
               <h2 data-lang="es">Listar SMS</h2>
               <h2 data-lang="en">List SMS</h2>
-              {_code_block([
-                ("Python", '''msgs = agent.list_sms(limit=20, direction="outbound")
-for m in msgs:
-    print(m.id, m.status, m.body)'''),
-                ("curl", '''curl "https://api.protocolami.com/v1/agent/sms?limit=20&direction=outbound" \\
-  -H "Authorization: Bearer $AGENT_TOKEN"'''),
-              ])}
+              {_block2}
 
               <h2 data-lang="es">SMS entrante</h2>
               <h2 data-lang="en">Inbound SMS</h2>
@@ -909,7 +926,7 @@ for m in msgs:
                 <tr><td class="mono">failed</td><td data-lang="es">DLR de fallo — retry automático hasta 3 veces</td><td data-lang="en">failure DLR — auto-retried up to 3 times</td></tr>
                 <tr><td class="mono">received</td><td data-lang="es">MO entrante</td><td data-lang="en">inbound MO</td></tr>
               </table>
-            """,
+            """)(),
         },
 
         # ===== VOICE =====
@@ -918,7 +935,42 @@ for m in msgs:
             "group": "operations",
             "group_es": "Operations", "group_en": "Operations",
             "title_es": "Voz (bridge-by-API)", "title_en": "Voice (bridge-by-API)",
-            "body": f"""
+            "body": (lambda
+                _block1=_code_block([
+                    ("Python", 'call = agent.place_call(\n'
+                     '    to="+34600999888",\n'
+                     '    callback_sip_uri="sip:proj@sip.api.example;transport=tls",\n'
+                     ')\n'
+                     'print(call.id, call.status)  # initiated'),
+                    ("TypeScript", 'const call = await agent.placeCall({\n'
+                     '  to: "+34600999888",\n'
+                     '  callbackSipUri: "sip:proj@sip.api.example;transport=tls",\n'
+                     '});'),
+                    ("curl",
+                     'curl -X POST https://api.protocolami.com/v1/agent/calls/place \\\n'
+                     '  -H "Authorization: Bearer $AGENT_TOKEN" \\\n'
+                     "  -d '" + json_dumps({
+                       "to": "+34600999888",
+                       "callback_sip_uri": "sip:proj@sip.api.example;transport=tls",
+                     }) + "'"),
+                ]),
+                _block2=_code_block([
+                    ("Python", "agent.hangup_call(call.id)"),
+                    ("TypeScript", "await agent.hangupCall(call.id);"),
+                    ("curl", '''curl -X POST https://api.protocolami.com/v1/agent/calls/$CALL_ID/hangup \\
+  -H "Authorization: Bearer $AGENT_TOKEN"'''),
+                ]),
+                _block3=_code_block([
+                    ("Python", 'client.set_inbound_sip_uri(mid,\n'
+                     '    "sip:agent@your-pbx.example;transport=tls")'),
+                    ("curl",
+                     'curl -X POST https://api.protocolami.com/v1/mobile-identities/$MID/inbound-config \\\n'
+                     '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
+                     "  -d '" + json_dumps({
+                       "inbound_sip_uri": "sip:agent@your-pbx.example;transport=tls",
+                     }) + "'"),
+                ]),
+            : f"""
               <h1 data-lang="es">Voz · bridge-by-API</h1>
               <h1 data-lang="en">Voice · bridge-by-API</h1>
               <blockquote data-lang="es">
@@ -934,33 +986,11 @@ for m in msgs:
 
               <h2 data-lang="es">Originar una llamada saliente</h2>
               <h2 data-lang="en">Place an outbound call</h2>
-              {_code_block([
-                ("Python", 'call = agent.place_call(\n'
-                 '    to="+34600999888",\n'
-                 '    callback_sip_uri="sip:proj@sip.api.example;transport=tls",\n'
-                 ')\n'
-                 'print(call.id, call.status)  # initiated'),
-                ("TypeScript", 'const call = await agent.placeCall({\n'
-                 '  to: "+34600999888",\n'
-                 '  callbackSipUri: "sip:proj@sip.api.example;transport=tls",\n'
-                 '});'),
-                ("curl",
-                 'curl -X POST https://api.protocolami.com/v1/agent/calls/place \\\n'
-                 '  -H "Authorization: Bearer $AGENT_TOKEN" \\\n'
-                 "  -d '" + json_dumps({
-                   "to": "+34600999888",
-                   "callback_sip_uri": "sip:proj@sip.api.example;transport=tls",
-                 }) + "'"),
-              ])}
+              {_block1}
 
               <h2 data-lang="es">Colgar una llamada</h2>
               <h2 data-lang="en">Hang up a call</h2>
-              {_code_block([
-                ("Python", "agent.hangup_call(call.id)"),
-                ("TypeScript", "await agent.hangupCall(call.id);"),
-                ("curl", '''curl -X POST https://api.protocolami.com/v1/agent/calls/$CALL_ID/hangup \\
-  -H "Authorization: Bearer $AGENT_TOKEN"'''),
-              ])}
+              {_block2}
 
               <h2 data-lang="es">Llamadas entrantes</h2>
               <h2 data-lang="en">Inbound calls</h2>
@@ -976,16 +1006,7 @@ for m in msgs:
                 bridges it via SIP to your configured URI. Without a configured
                 URI, the call is cleanly rejected with 486 Busy Here.
               </p>
-              {_code_block([
-                ("Python", 'client.set_inbound_sip_uri(mid,\n'
-                 '    "sip:agent@your-pbx.example;transport=tls")'),
-                ("curl",
-                 'curl -X POST https://api.protocolami.com/v1/mobile-identities/$MID/inbound-config \\\n'
-                 '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
-                 "  -d '" + json_dumps({
-                   "inbound_sip_uri": "sip:agent@your-pbx.example;transport=tls",
-                 }) + "'"),
-              ])}
+              {_block3}
 
               <h2 data-lang="es">Lifecycle de una llamada</h2>
               <h2 data-lang="en">Call lifecycle</h2>
@@ -996,7 +1017,7 @@ for m in msgs:
                 <tr><td class="mono">busy</td><td data-lang="es">línea ocupada (NO se reintenta)</td><td data-lang="en">line busy (NOT retried)</td></tr>
                 <tr><td class="mono">cancelled</td><td data-lang="es">hangup explícito antes de answer</td><td data-lang="en">explicit hangup before answer</td></tr>
               </table>
-            """,
+            """)(),
         },
 
         # ===== WEBHOOKS =====
@@ -1005,7 +1026,58 @@ for m in msgs:
             "group": "operations",
             "group_es": "Operations", "group_en": "Operations",
             "title_es": "Webhooks", "title_en": "Webhooks",
-            "body": f"""
+            "body": (lambda
+                _block1=_code_block([
+                    ("Python", 'wh = client.create_webhook(mid,\n'
+                     '    url="https://your-app.example/ami/hook",\n'
+                     '    events=["sms.inbound","call.completed"])\n'
+                     '# wh.secret está aquí UNA SOLA VEZ — guárdalo\n'
+                     'print(wh.secret)'),
+                    ("curl",
+                     'curl -X POST https://api.protocolami.com/v1/mobile-identities/$MID/webhooks \\\n'
+                     '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
+                     "  -d '" + json_dumps({
+                       "url": "https://your-app.example/ami/hook",
+                       "events": ["sms.inbound", "call.completed"],
+                     }) + "'"),
+                ]),
+                _block2=_code_block([
+                    ("Python", '''from ami.webhooks import verify_signature
+
+def my_handler(request):
+    body = request.body
+    sig = request.headers["X-Ami-Signature"]
+    ts  = request.headers["X-Ami-Timestamp"]
+    if not verify_signature(secret="whsec_...",
+                            body=body,
+                            signature_header=sig,
+                            timestamp_header=ts):
+        return 401
+    payload = json.loads(body)
+    # payload = {"event": "sms.inbound", "mid": "mid_...", "data": {...}, "delivered_at": "..."}
+    ...'''),
+                    ("TypeScript", '''import { verifySignature } from "@ami-protocol/sdk/webhooks";
+
+export async function handler(req) {
+  const body = await readRawBody(req);
+  const sig  = req.headers["x-ami-signature"];
+  const ts   = req.headers["x-ami-timestamp"];
+  const ok = verifySignature({
+    secret: process.env.AMI_WEBHOOK_SECRET,
+    body, signatureHeader: sig, timestampHeader: ts,
+  });
+  if (!ok) return new Response(null, { status: 401 });
+  const payload = JSON.parse(body);
+  ...
+}'''),
+                    ("manual", '''# pseudocode — equivalente en cualquier lenguaje
+ts = headers["X-Ami-Timestamp"]
+sig_header = headers["X-Ami-Signature"]   # "sha256=<hex>"
+if abs(now() - int(ts)) > 300: reject("stale")
+expected = "sha256=" + hmac_sha256(secret, ts + "." + raw_body).hex()
+if not constant_time_eq(expected, sig_header): reject("bad sig")'''),
+                ]),
+            : f"""
               <h1>Webhooks</h1>
               <p class="lead" data-lang="es">
                 AMI te hace POST a una URL tuya cuando ocurre un evento del
@@ -1020,20 +1092,7 @@ for m in msgs:
 
               <h2 data-lang="es">Registrar un webhook</h2>
               <h2 data-lang="en">Register a webhook</h2>
-              {_code_block([
-                ("Python", 'wh = client.create_webhook(mid,\n'
-                 '    url="https://your-app.example/ami/hook",\n'
-                 '    events=["sms.inbound","call.completed"])\n'
-                 '# wh.secret está aquí UNA SOLA VEZ — guárdalo\n'
-                 'print(wh.secret)'),
-                ("curl",
-                 'curl -X POST https://api.protocolami.com/v1/mobile-identities/$MID/webhooks \\\n'
-                 '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
-                 "  -d '" + json_dumps({
-                   "url": "https://your-app.example/ami/hook",
-                   "events": ["sms.inbound", "call.completed"],
-                 }) + "'"),
-              ])}
+              {_block1}
 
               <h2 data-lang="es">Eventos disponibles</h2>
               <h2 data-lang="en">Available events</h2>
@@ -1049,42 +1108,7 @@ for m in msgs:
 
               <h2 data-lang="es">Verificar la firma en tu handler</h2>
               <h2 data-lang="en">Verify the signature in your handler</h2>
-              {_code_block([
-                ("Python", '''from ami.webhooks import verify_signature
-
-def my_handler(request):
-    body = request.body
-    sig = request.headers["X-Ami-Signature"]
-    ts  = request.headers["X-Ami-Timestamp"]
-    if not verify_signature(secret="whsec_...",
-                            body=body,
-                            signature_header=sig,
-                            timestamp_header=ts):
-        return 401
-    payload = json.loads(body)
-    # payload = {{"event": "sms.inbound", "mid": "mid_...", "data": {{...}}, "delivered_at": "..."}}
-    ...'''),
-                ("TypeScript", '''import {{ verifySignature }} from "@ami-protocol/sdk/webhooks";
-
-export async function handler(req) {{
-  const body = await readRawBody(req);
-  const sig  = req.headers["x-ami-signature"];
-  const ts   = req.headers["x-ami-timestamp"];
-  const ok = verifySignature({{
-    secret: process.env.AMI_WEBHOOK_SECRET,
-    body, signatureHeader: sig, timestampHeader: ts,
-  }});
-  if (!ok) return new Response(null, {{ status: 401 }});
-  const payload = JSON.parse(body);
-  ...
-}}'''),
-                ("manual", '''# pseudocode — equivalente en cualquier lenguaje
-ts = headers["X-Ami-Timestamp"]
-sig_header = headers["X-Ami-Signature"]   # "sha256=<hex>"
-if abs(now() - int(ts)) > 300: reject("stale")
-expected = "sha256=" + hmac_sha256(secret, ts + "." + raw_body).hex()
-if not constant_time_eq(expected, sig_header): reject("bad sig")'''),
-              ])}
+              {_block2}
 
               <h2 data-lang="es">Política de reintentos</h2>
               <h2 data-lang="en">Retry policy</h2>
@@ -1102,7 +1126,7 @@ if not constant_time_eq(expected, sig_header): reject("bad sig")'''),
                 URL before each delivery (not only at register time) and reject
                 automatic 3xx redirects.
               </p>
-            """,
+            """)(),
         },
 
         # ===== LIMITS =====
@@ -1111,7 +1135,25 @@ if not constant_time_eq(expected, sig_header): reject("bad sig")'''),
             "group": "operations",
             "group_es": "Operations", "group_en": "Operations",
             "title_es": "Límites y gasto", "title_en": "Limits & spending",
-            "body": f"""
+            "body": (lambda
+                _block1=_code_block([
+                    ("Python", 'client.update_limits(mid,\n'
+                     '    sms_per_day=1000,\n'
+                     '    monthly_budget_eur=50,\n'
+                     '    allowed_country_prefixes=["+34","+33","+1"])'),
+                    ("curl",
+                     'curl -X POST https://api.protocolami.com/v1/mobile-identities/$MID/limits \\\n'
+                     '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
+                     "  -d '" + json_dumps({"sms_per_day": 1000, "monthly_budget_eur": 50}) + "'"),
+                ]),
+                _block2=_code_block([
+                    ("Python", '''u = agent.usage()
+print(f"SMS today: {u.sms_count_today} / {u.sms_per_day}")
+print(f"Spend: €{u.spend_this_month_eur} / €{u.monthly_budget_eur}")'''),
+                    ("curl", '''curl https://api.protocolami.com/v1/agent/usage \\
+  -H "Authorization: Bearer $AGENT_TOKEN"'''),
+                ]),
+            : f"""
               <h1 data-lang="es">Rate limits y spending</h1>
               <h1 data-lang="en">Rate limits and spending</h1>
               <p class="lead" data-lang="es">
@@ -1138,26 +1180,11 @@ if not constant_time_eq(expected, sig_header): reject("bad sig")'''),
 
               <h2 data-lang="es">Cambiar los límites</h2>
               <h2 data-lang="en">Change the limits</h2>
-              {_code_block([
-                ("Python", 'client.update_limits(mid,\n'
-                 '    sms_per_day=1000,\n'
-                 '    monthly_budget_eur=50,\n'
-                 '    allowed_country_prefixes=["+34","+33","+1"])'),
-                ("curl",
-                 'curl -X POST https://api.protocolami.com/v1/mobile-identities/$MID/limits \\\n'
-                 '  -H "Authorization: Bearer $AMI_API_KEY" \\\n'
-                 "  -d '" + json_dumps({"sms_per_day": 1000, "monthly_budget_eur": 50}) + "'"),
-              ])}
+              {_block1}
 
               <h2 data-lang="es">Ver uso en tiempo real</h2>
               <h2 data-lang="en">Real-time usage</h2>
-              {_code_block([
-                ("Python", '''u = agent.usage()
-print(f"SMS today: {{u.sms_count_today}} / {{u.sms_per_day}}")
-print(f"Spend: €{{u.spend_this_month_eur}} / €{{u.monthly_budget_eur}}")'''),
-                ("curl", '''curl https://api.protocolami.com/v1/agent/usage \\
-  -H "Authorization: Bearer $AGENT_TOKEN"'''),
-              ])}
+              {_block2}
 
               <h2 data-lang="es">Razones de bloqueo (429)</h2>
               <h2 data-lang="en">Block reasons (429)</h2>
@@ -1167,7 +1194,7 @@ print(f"Spend: €{{u.spend_this_month_eur}} / €{{u.monthly_budget_eur}}")''')
                 <li><code>calls_hourly_limit_exceeded</code> · <code>calls_daily_limit_exceeded</code></li>
                 <li><code>monthly_budget_exceeded</code></li>
               </ul>
-            """,
+            """)(),
         },
 
         # ===== ADMIN =====
@@ -1176,7 +1203,31 @@ print(f"Spend: €{{u.spend_this_month_eur}} / €{{u.monthly_budget_eur}}")''')
             "group": "operations",
             "group_es": "Operations", "group_en": "Operations",
             "title_es": "Admin (multi-tenancy)", "title_en": "Admin (multi-tenancy)",
-            "body": f"""
+            "body": (lambda
+                _block1=_code_block([
+                    ("curl",
+                     "curl -X POST https://api.protocolami.com/v1/admin/customers \\\n"
+                     '  -H "Authorization: Bearer $AMI_ADMIN_KEY" \\\n'
+                     "  -d '" + json_dumps({"name": "Acme Robotics",
+                                             "billing_email": "billing@acme.test"}) + "'\n"
+                     "# devuelve api_key UNA SOLA VEZ"),
+                ]),
+                _block2=_code_block([
+                    ("curl",
+                     "# listar\n"
+                     "curl https://api.protocolami.com/v1/admin/customers \\\n"
+                     '  -H "Authorization: Bearer $AMI_ADMIN_KEY"\n\n'
+                     "# rotar API key (hard rotate)\n"
+                     "curl -X POST https://api.protocolami.com/v1/admin/customers/$ID/rotate-key \\\n"
+                     '  -H "Authorization: Bearer $AMI_ADMIN_KEY"\n\n'
+                     "# suspender / reactivar\n"
+                     "curl -X POST https://api.protocolami.com/v1/admin/customers/$ID/suspend \\\n"
+                     '  -H "Authorization: Bearer $AMI_ADMIN_KEY" \\\n'
+                     "  -d '" + json_dumps({"reason": "non_payment"}) + "'\n"
+                     "curl -X POST https://api.protocolami.com/v1/admin/customers/$ID/activate \\\n"
+                     '  -H "Authorization: Bearer $AMI_ADMIN_KEY"'),
+                ]),
+            : f"""
               <h1>Admin · multi-tenancy</h1>
               <p class="lead" data-lang="es">
                 Los endpoints <code>/v1/admin/*</code> gestionan customers (cuentas
@@ -1191,32 +1242,11 @@ print(f"Spend: €{{u.spend_this_month_eur}} / €{{u.monthly_budget_eur}}")''')
 
               <h2 data-lang="es">Crear un customer-account</h2>
               <h2 data-lang="en">Create a customer-account</h2>
-              {_code_block([
-                ("curl",
-                 "curl -X POST https://api.protocolami.com/v1/admin/customers \\\n"
-                 '  -H "Authorization: Bearer $AMI_ADMIN_KEY" \\\n'
-                 "  -d '" + json_dumps({"name": "Acme Robotics",
-                                         "billing_email": "billing@acme.test"}) + "'\n"
-                 "# devuelve api_key UNA SOLA VEZ"),
-              ])}
+              {_block1}
 
               <h2 data-lang="es">Listar / rotar / suspender</h2>
               <h2 data-lang="en">List / rotate / suspend</h2>
-              {_code_block([
-                ("curl",
-                 "# listar\n"
-                 "curl https://api.protocolami.com/v1/admin/customers \\\n"
-                 '  -H "Authorization: Bearer $AMI_ADMIN_KEY"\n\n'
-                 "# rotar API key (hard rotate)\n"
-                 "curl -X POST https://api.protocolami.com/v1/admin/customers/$ID/rotate-key \\\n"
-                 '  -H "Authorization: Bearer $AMI_ADMIN_KEY"\n\n'
-                 "# suspender / reactivar\n"
-                 "curl -X POST https://api.protocolami.com/v1/admin/customers/$ID/suspend \\\n"
-                 '  -H "Authorization: Bearer $AMI_ADMIN_KEY" \\\n'
-                 "  -d '" + json_dumps({"reason": "non_payment"}) + "'\n"
-                 "curl -X POST https://api.protocolami.com/v1/admin/customers/$ID/activate \\\n"
-                 '  -H "Authorization: Bearer $AMI_ADMIN_KEY"'),
-              ])}
+              {_block2}
 
               <h2 data-lang="es">Aislamiento entre customers</h2>
               <h2 data-lang="en">Isolation between customers</h2>
@@ -1234,7 +1264,7 @@ print(f"Spend: €{{u.spend_this_month_eur}} / €{{u.monthly_budget_eur}}")''')
                 mutate or operate any resource of B. The attempt returns 404
                 (not 403) to avoid leaking the id's existence.
               </p>
-            """,
+            """)(),
         },
 
         # ===== ERRORS =====

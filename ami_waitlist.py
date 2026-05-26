@@ -581,7 +581,10 @@ def _waitlist_js(form_id: str, success_id: str, error_id: str,
         "      if (res.status === 201 && res.body.ok) {\n"
         "        form.style.display = 'none';\n"
         "        success.classList.add('is-visible');\n"
-        f"        {'window.location.hash = \"#joined\";' if redirect_on_success else ''}\n"
+        # Backslash NO permitido en una expresión f-string en Python 3.11,
+        # así que precomputamos el snippet con concatenación normal.
+        + ('        window.location.hash = "#joined";\n' if redirect_on_success else "")
+        +
         "      } else {\n"
         "        var code = (res.body && res.body.error) || 'generic';\n"
         "        showError(L[code] || L.generic);\n"
