@@ -278,7 +278,61 @@ def test_panel_kyc_login_sets_cookie_and_redirects(server_url, admin_headers):
     cookies = r.headers.get_list("set-cookie")
     assert any("ami-kyc-admin=admin_test_key" in c for c in cookies)
     assert any("ami-kyc-reviewer=daniel" in c for c in cookies)
-    assert all("HttpOnly" in c for c in cookies)
+    # Las cookies de sesión deben ser HttpOnly. La CSRF (ami-kyc-csrf) NO,
+    # porque el JS del panel necesita leerla para el double-submit pattern.
+    for c in cookies:
+        if c.startswith("ami-kyc-csrf="):
+            assert "HttpOnly" not in c
+        else:
+            assert "HttpOnly" in c
+    # CSRF cookie debe existir y ser != vacío
+    assert any(c.startswith("ami-kyc-csrf=") and len(c.split(";")[0]) > len("ami-kyc-csrf=10")
+                for c in cookies)
+
+
+def test_csrf_required_when_authed_by_cookie(server_url, client, anon_client,
+                                                accepted_offer_with_customer, admin_headers):
+    """Verify/reject por cookie deben fallar sin X-CSRF-Token aunque la cookie
+    de sesión esté presente."""
+    import httpx
+    token = _token_from(client, accepted_offer_with_customer["sim_request_id"])
+    anon_client.post(f"/kyc/{token}/submit", json={"dni_front_b64": _TINY_JPEG_B64})
+
+    # Login para conseguir cookies (incluye ami-kyc-csrf)
+    with httpx.Client(base_url=server_url, follow_redirects=False, timeout=5) as c:
+        login = c.post("/panel/kyc/login",
+                       data={"key": "admin_test_key", "reviewer": "ops"})
+    cookies = {}
+    for sc in login.headers.get_list("set-cookie"):
+        k, _, rest = sc.partition("=")
+        v = rest.split(";")[0]
+        cookies[k] = v
+
+    # Listo el KYC con la sesión
+    with httpx.Client(base_url=server_url, cookies=cookies, timeout=5) as session:
+        kyc_id = session.get("/v1/admin/kyc").json()["kycs"][0]["id"]
+        # SIN header CSRF → 403
+        r = session.post(f"/v1/admin/kyc/{kyc_id}/verify", json={"reviewer": "ops"})
+        assert r.status_code == 403, f"esperaba 403 sin CSRF, got {r.status_code}"
+        assert r.json()["error"] == "csrf_token_invalid"
+        # CON header CSRF correcto → 200
+        r2 = session.post(f"/v1/admin/kyc/{kyc_id}/verify",
+                          json={"reviewer": "ops"},
+                          headers={"X-CSRF-Token": cookies["ami-kyc-csrf"]})
+        assert r2.status_code == 200, r2.text
+
+
+def test_csrf_not_required_for_bearer(server_url, client, anon_client,
+                                        accepted_offer_with_customer, admin_headers):
+    """Con Bearer (clients programáticos) no aplica CSRF."""
+    import httpx
+    token = _token_from(client, accepted_offer_with_customer["sim_request_id"])
+    anon_client.post(f"/kyc/{token}/submit", json={"dni_front_b64": _TINY_JPEG_B64})
+    with httpx.Client(base_url=server_url, headers=admin_headers, timeout=5) as bearer:
+        kyc_id = bearer.get("/v1/admin/kyc").json()["kycs"][0]["id"]
+        # Bearer puro, sin CSRF → 200
+        r = bearer.post(f"/v1/admin/kyc/{kyc_id}/verify", json={"reviewer": "ops"})
+        assert r.status_code == 200
 
 
 def test_panel_kyc_cookie_grants_access(server_url, client, anon_client, accepted_offer_with_customer, admin_headers):

@@ -33,10 +33,12 @@ import ami_kyc_admin
 import ami_kyc_storage
 import ami_notify
 import ami_backup
+import ami_log
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
-MAX_EVENTS_RETAINED = int(os.environ.get("AMI_MAX_EVENTS_RETAINED") or 5000)
+_EVENTS_MAX_KEPT_ENV = os.environ.get("AMI_EVENTS_MAX_KEPT") or os.environ.get("AMI_MAX_EVENTS_RETAINED")
+MAX_EVENTS_RETAINED = int(_EVENTS_MAX_KEPT_ENV or 10000)
 MAX_WEBHOOKS_PER_MID = int(os.environ.get("AMI_MAX_WEBHOOKS_PER_MID") or 10)
 
 # Rate-limit del panel login (anti credential stuffing).
@@ -522,7 +524,13 @@ def check_admin_auth(handler):
 def check_kyc_admin_auth(handler):
     """Auth para endpoints KYC admin. Acepta Bearer, cookie de sesión
     (set por POST /panel/kyc/login) o query ?key= para demos. El JS del
-    panel envía cookie automáticamente, por eso lo aceptamos aquí."""
+    panel envía cookie automáticamente, por eso lo aceptamos aquí.
+
+    Si la auth pasa por cookie, los endpoints que mutan estado (verify,
+    reject, purge) DEBEN además exigir un header X-CSRF-Token que coincida
+    con la cookie ami-kyc-csrf — double-submit cookie pattern. Para Bearer
+    o query no aplica CSRF (no son explotables cross-site).
+    """
     if check_admin_auth(handler):
         return True
     if ADMIN_KEY is None:
@@ -538,6 +546,39 @@ def check_kyc_admin_auth(handler):
     except Exception:
         pass
     return False
+
+
+def check_kyc_admin_csrf(handler) -> bool:
+    """Si la auth es por cookie, verifica double-submit CSRF token.
+    Si la auth es por Bearer, devuelve True (CSRF no aplica).
+    Llamar SOLO después de check_kyc_admin_auth().
+    """
+    # Si hay Bearer válido, ignoramos CSRF (clients programáticos)
+    auth = handler.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and ADMIN_KEY:
+        if secrets.compare_digest(auth[7:], ADMIN_KEY):
+            return True
+    # Si la auth es por cookie, exigimos matching CSRF.
+    cookie = handler.headers.get("Cookie", "") or ""
+    csrf_cookie = None
+    has_session = False
+    for part in cookie.split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == "ami-kyc-csrf":
+            csrf_cookie = v
+        elif k == ami_kyc_admin.COOKIE_NAME and v:
+            has_session = True
+    if not has_session:
+        # No es sesión cookie — probablemente query ?key=. Lo aceptamos
+        # por compat con la demo CLI (curl).
+        return True
+    header_token = handler.headers.get("X-CSRF-Token") or ""
+    if not csrf_cookie or not header_token:
+        return False
+    try:
+        return secrets.compare_digest(csrf_cookie, header_token)
+    except (TypeError, ValueError):
+        return False
 
 
 # ----- Scoped agent tokens (Nivel 2 de auth) -------------------------
@@ -1027,8 +1068,11 @@ def event(action, entity_type, entity_id, data=None):
     e = {"id": new_id("evt"), "at": now(), "action": action,
          "entity_type": entity_type, "entity_id": entity_id, "data": data or {}}
     STATE["events"].append(e)
-    # Rotación: mantenemos solo los últimos N eventos para evitar growth sin
-    # tope. En v2 esto se mueve a una tabla con TTL en SQLite.
+    # Rotación: mantenemos solo los últimos MAX_EVENTS_RETAINED eventos para
+    # evitar que el blob de STATE crezca sin tope (cada request HTTP escribe el
+    # snapshot completo via ami_storage.save_state). Configurable via
+    # AMI_EVENTS_MAX_KEPT (default 10000). En v2 esto se mueve a una tabla con
+    # TTL en SQLite y escrituras incrementales.
     if len(STATE["events"]) > MAX_EVENTS_RETAINED:
         del STATE["events"][:len(STATE["events"]) - MAX_EVENTS_RETAINED]
     return e
@@ -6646,7 +6690,50 @@ _bootstrap_default_customer()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        print("AMI", self.address_string(), fmt % args)
+        """Override del default Apache-like log de BaseHTTPRequestHandler.
+        El handler base llama con fmt='"%s" %s %s' y args=(requestline, code, size).
+        Parseamos y emitimos JSON estructurado vía ami_log."""
+        ip = self.address_string()
+        ua = ""
+        try:
+            ua = self.headers.get("User-Agent", "") or ""
+        except Exception:
+            ua = ""
+        # Caso típico: log_request → fmt='"%s" %s %s'. Lo desempaquetamos.
+        method = path = ""
+        status = None
+        size = None
+        if len(args) >= 1 and isinstance(args[0], str):
+            parts = args[0].split(" ")
+            if len(parts) >= 2:
+                method = parts[0]
+                path = parts[1]
+            else:
+                path = args[0]
+        if len(args) >= 2:
+            try:
+                status = int(args[1])
+            except (TypeError, ValueError):
+                status = None
+        if len(args) >= 3 and args[2] not in (None, "-"):
+            try:
+                size = int(args[2])
+            except (TypeError, ValueError):
+                size = None
+        if method or path or status is not None:
+            ami_log.info(
+                "http_request",
+                method=method,
+                path=path,
+                status=status,
+                ip=ip,
+                ua=ua,
+                size=size,
+            )
+        else:
+            # Fallback: log_error u otros formatos no estándar. Mantenemos el
+            # mensaje crudo bajo un evento genérico para no perder señal.
+            ami_log.info("http_log", ip=ip, message=(fmt % args) if args else fmt)
 
     def handle_one_request(self):
         """Wrap del request para persistir STATE + grabar métricas + serialize
@@ -6782,10 +6869,37 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/favicon.ico":
             return respond_text(self, 204, "", content_type="image/x-icon")
         if p == "/v1/health":
+            import threading as _th
+            # Inventario de threads daemon que esperamos vivos. Si alguno
+            # murió, "ok" pasa a false (Render restartea el container).
+            expected_daemons = {"ami-kyc-purge", "ami-backup"}
+            daemons_alive = {t.name for t in _th.enumerate()
+                             if t.daemon and t.name in expected_daemons}
+            missing_daemons = expected_daemons - daemons_alive
+            # Sólo marcamos ok=False si arrancamos con la persistencia activa
+            # (modo prod). En tests / mode :memory: los daemons no se lanzan.
+            persistence_on = ami_storage.is_enabled()
             return response(self, 200, {
-                "ok": True, "service": "ami", "time": now(),
+                "ok": (not missing_daemons) or not persistence_on,
+                "service": "ami",
+                "time": now(),
                 "telco": get_active_adapter().health(),
                 "backup": ami_backup.stats(),
+                "storage": ami_storage.stats(),
+                "daemons": {
+                    "alive": sorted(daemons_alive),
+                    "expected": sorted(expected_daemons),
+                    "missing": sorted(missing_daemons),
+                },
+                "state": {
+                    "events": len(STATE.get("events", [])),
+                    "events_cap": MAX_EVENTS_RETAINED,
+                    "active_mids": sum(1 for m in STATE["mobile_identities"].values()
+                                        if m.get("status") == "active"),
+                    "kyc_pending": sum(1 for k in STATE["kyc_verifications"].values()
+                                        if k.get("status") in ("pending", "submitted")),
+                    "webhooks": len(STATE.get("webhooks", {})),
+                },
             })
         if p == "/metrics":
             # Endpoint de scrape Prometheus. Público por convención (no expone PII).
@@ -7008,7 +7122,17 @@ class Handler(BaseHTTPRequestHandler):
             if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             whs = [ami_webhooks.webhook_summary(w)
-                   for w in STATE["webhooks"].values() if w["mid"] == mid]
+                   for w in STATE["webhooks"].values() if w.get("mid") == mid]
+            return response(self, 200, {"webhooks": whs, "count": len(whs)})
+
+        # Listar webhooks account-scoped (reciben kyc.*, system.*, etc.).
+        # Auth: API key del customer; el account_id sale del Bearer.
+        if p == "/v1/account/webhooks":
+            acc = _request_account_id(self)
+            if not acc:
+                return response(self, 401, {"error": "unauthorized"})
+            whs = [ami_webhooks.webhook_summary(w)
+                   for w in STATE["webhooks"].values() if w.get("account_id") == acc]
             return response(self, 200, {"webhooks": whs, "count": len(whs)})
 
         m = re.match(r"^/v1/(sim-requests|offers|customers|contracts|mobile-identities)/([^/]+)$", p)
@@ -7296,12 +7420,17 @@ class Handler(BaseHTTPRequestHandler):
                 return respond_html(self, 400, ami_kyc_admin.render_login("Falta el nombre del revisor"))
             # Cookie httpOnly + Secure (si AMI_PUBLIC_URL es https). SameSite=Strict.
             secure = "; Secure" if (os.environ.get("AMI_PUBLIC_URL", "").startswith("https://")) else ""
+            # CSRF token: random 32 bytes, accesible al JS (Path=/, no HttpOnly)
+            # para incluirlo en el header X-CSRF-Token de las acciones admin.
+            csrf_token = secrets.token_urlsafe(32)
             self.send_response(303)
             self.send_header("Location", "/panel/kyc")
             self.send_header("Set-Cookie",
                 f"{ami_kyc_admin.COOKIE_NAME}={key}; HttpOnly; Path=/; SameSite=Strict; Max-Age=28800{secure}")
             self.send_header("Set-Cookie",
                 f"ami-kyc-reviewer={reviewer}; HttpOnly; Path=/; SameSite=Strict; Max-Age=28800{secure}")
+            self.send_header("Set-Cookie",
+                f"ami-kyc-csrf={csrf_token}; Path=/; SameSite=Strict; Max-Age=28800{secure}")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -7341,7 +7470,7 @@ class Handler(BaseHTTPRequestHandler):
                 return response(self, 400, {"error": reason})
             event("kyc_submitted", "kyc_verification", kyc["id"],
                   {"sim_request_id": kyc["sim_request_id"]})
-            ami_webhooks.dispatch_event("kyc.submitted",
+            ami_webhooks.dispatch_account_event("kyc.submitted",
                                          kyc.get("account_id") or "",
                                          {"kyc_id": kyc["id"],
                                           "sim_request_id": kyc["sim_request_id"]})
@@ -7354,6 +7483,8 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/v1/admin/kyc/purge":
             if not check_kyc_admin_auth(self):
                 return response(self, 401, {"error": "unauthorized_admin"})
+            if not check_kyc_admin_csrf(self):
+                return response(self, 403, {"error": "csrf_token_invalid"})
             result = ami_kyc.purge_expired(STATE)
             return response(self, 200, result)
 
@@ -7369,6 +7500,8 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             if not check_kyc_admin_auth(self):
                 return response(self, 401, {"error": "unauthorized_admin"})
+            if not check_kyc_admin_csrf(self):
+                return response(self, 403, {"error": "csrf_token_invalid"})
             kyc_id, action = m.group(1), m.group(2)
             kyc = STATE["kyc_verifications"].get(kyc_id)
             if not kyc:
@@ -7381,7 +7514,7 @@ class Handler(BaseHTTPRequestHandler):
                 kyc["reviewer"] = data.get("reviewer") or "admin"
                 event("kyc_verified", "kyc_verification", kyc_id,
                       {"reviewer": kyc["reviewer"]})
-                ami_webhooks.dispatch_event("kyc.verified",
+                ami_webhooks.dispatch_account_event("kyc.verified",
                                              kyc.get("account_id") or "",
                                              {"kyc_id": kyc_id,
                                               "sim_request_id": kyc["sim_request_id"]})
@@ -7393,7 +7526,7 @@ class Handler(BaseHTTPRequestHandler):
                 kyc["rejected_at"] = now()
                 event("kyc_rejected", "kyc_verification", kyc_id,
                       {"reason": kyc["rejection_reason"]})
-                ami_webhooks.dispatch_event("kyc.rejected",
+                ami_webhooks.dispatch_account_event("kyc.rejected",
                                              kyc.get("account_id") or "",
                                              {"kyc_id": kyc_id,
                                               "reason": kyc["rejection_reason"]})
@@ -7740,10 +7873,54 @@ class Handler(BaseHTTPRequestHandler):
             if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "webhook_not_found"})
             wh = STATE["webhooks"].get(wh_id)
-            if not wh or wh["mid"] != mid:
+            if not wh or wh.get("mid") != mid:
                 return response(self, 404, {"error": "webhook_not_found"})
             del STATE["webhooks"][wh_id]
             event("webhook_deleted", "webhook", wh_id, {"mid": mid})
+            return response(self, 200, {"id": wh_id, "deleted": True})
+
+        # Crear un webhook ACCOUNT-SCOPED (kyc.*, etc.). Auth: API key del customer.
+        if p == "/v1/account/webhooks":
+            acc = _request_account_id(self)
+            if not acc:
+                return response(self, 401, {"error": "unauthorized"})
+            url = (data.get("url") or "").strip()
+            ok_url, reason = ami_security.is_safe_webhook_url(url)
+            if not ok_url:
+                return response(self, 400, {"error": "invalid_url", "detail": reason})
+            events_raw = data.get("events") or ["*"]
+            if not isinstance(events_raw, list):
+                return response(self, 400, {"error": "invalid_events"})
+            for ev in events_raw:
+                if ev != "*" and ev not in ami_webhooks.SUPPORTED_EVENTS:
+                    return response(self, 400, {"error": "unsupported_event", "event": ev,
+                                                 "supported": sorted(ami_webhooks.SUPPORTED_EVENTS)})
+            # Cap por account: mismo MAX_WEBHOOKS_PER_MID — protección thread bomb.
+            acc_webhooks = [w for w in STATE["webhooks"].values() if w.get("account_id") == acc]
+            if len(acc_webhooks) >= MAX_WEBHOOKS_PER_MID:
+                return response(self, 409, {"error": "webhook_limit_reached", "limit": MAX_WEBHOOKS_PER_MID})
+            wh = ami_webhooks.new_webhook(mid="", url=url, events=events_raw, account_id=acc)
+            STATE["webhooks"][wh["id"]] = wh
+            event("webhook_created", "webhook", wh["id"],
+                  {"account_id": acc, "scope": "account", "url": url, "events": events_raw})
+            return response(self, 201, {
+                **ami_webhooks.webhook_summary(wh),
+                "secret": wh["secret"],
+                "secret_hint": "Guarda este secret una sola vez para verificar X-Ami-Signature.",
+            })
+
+        # Borrar un webhook account-scoped.
+        m = re.match(r"^/v1/account/webhooks/([^/]+)/delete$", p)
+        if m:
+            acc = _request_account_id(self)
+            if not acc:
+                return response(self, 401, {"error": "unauthorized"})
+            wh_id = m.group(1)
+            wh = STATE["webhooks"].get(wh_id)
+            if not wh or wh.get("account_id") != acc:
+                return response(self, 404, {"error": "webhook_not_found"})
+            del STATE["webhooks"][wh_id]
+            event("webhook_deleted", "webhook", wh_id, {"account_id": acc})
             return response(self, 200, {"id": wh_id, "deleted": True})
 
         # Configurar el endpoint SIP de entrantes para un MID. Auth: API key del
@@ -7857,18 +8034,23 @@ def _kyc_purge_loop():
             with STATE_LOCK:
                 result = ami_kyc.purge_expired(STATE)
             if any(result[k] for k in ("pending_expired", "images_purged", "rejected_dropped")):
-                print(f"AMI kyc-purge: {result}")
+                ami_log.info(
+                    "kyc_purge",
+                    pending_expired=result.get("pending_expired"),
+                    images_purged=result.get("images_purged"),
+                    rejected_dropped=result.get("rejected_dropped"),
+                )
         except Exception as e:
-            print(f"AMI kyc-purge ERROR: {e}")
+            ami_log.error("kyc_purge_failed", error=str(e), exc_type=type(e).__name__)
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
     if API_KEY is None:
-        print("AMI: WARNING — AMI_API_KEY not set; running in DEV MODE (auth disabled)")
+        ami_log.warn("auth_disabled", reason="ami_api_key_not_set", mode="dev")
     else:
-        print("AMI: auth enabled (Bearer AMI_API_KEY required)")
-    print(f"AMI mock API listening on :{port}")
+        ami_log.info("auth_enabled", scheme="bearer")
+    ami_log.info("server_listening", port=port)
     threading.Thread(target=_kyc_purge_loop, daemon=True, name="ami-kyc-purge").start()
     threading.Thread(target=ami_backup.backup_loop, daemon=True, name="ami-backup").start()
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

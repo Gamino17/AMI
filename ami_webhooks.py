@@ -66,13 +66,22 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_DELIVERY_WORKERS,
                                 thread_name_prefix="ami-webhook")
 
 
-def new_webhook(mid: str, url: str, events: list[str]) -> dict:
-    """Construye el record. No lo persiste — el caller decide dónde guardarlo."""
+def new_webhook(mid: str, url: str, events: list[str],
+                 account_id: str | None = None) -> dict:
+    """Construye el record. No lo persiste — el caller decide dónde guardarlo.
+
+    Dos modos de scoping:
+      - `mid` set, account_id None → webhook scoped a UN MID (sms/call events).
+      - `mid` "", account_id set   → webhook scoped a TODA la cuenta del cliente
+                                      (recibe eventos como kyc.* que ocurren antes
+                                      de que exista un MID).
+    """
     from ami_api import new_id, now
     secret = "whsec_" + secrets.token_hex(32)
     return {
         "id": new_id("wh"),
-        "mid": mid,
+        "mid": mid or "",
+        "account_id": account_id or None,
         "url": url,
         "events": events or ["*"],
         "secret": secret,
@@ -88,7 +97,9 @@ def webhook_summary(wh: dict) -> dict:
     """Vista pública del webhook (sin secret completo, solo prefijo)."""
     return {
         "id": wh["id"],
-        "mid": wh["mid"],
+        "mid": wh.get("mid") or None,
+        "account_id": wh.get("account_id"),
+        "scope": "account" if wh.get("account_id") else "mid",
         "url": wh["url"],
         "events": wh["events"],
         "status": wh["status"],
@@ -101,7 +112,9 @@ def webhook_summary(wh: dict) -> dict:
 
 
 def dispatch_event(event: str, mid: str, data: dict) -> int:
-    """Encuentra los webhooks suscritos al event/mid y los dispara async.
+    """Encuentra los webhooks scoped al MID y los dispara async.
+
+    Para eventos a nivel cuenta (kyc.*, system.*), usar dispatch_account_event.
 
     Devuelve el nº de webhooks que se intentaron disparar (útil para audit log).
     El envío se hace en threads daemon: el caller no se bloquea ni le importa
@@ -119,14 +132,41 @@ def dispatch_event(event: str, mid: str, data: dict) -> int:
             matched.append(wh)
     if not matched:
         return 0
+    return _dispatch(event, matched, {"mid": mid}, data, now())
+
+
+def dispatch_account_event(event: str, account_id: str, data: dict) -> int:
+    """Encuentra webhooks scoped al account_id (no a un MID específico)
+    y los dispara. Usado para eventos como kyc.* que ocurren antes de
+    que exista un MID.
+    """
+    if event not in SUPPORTED_EVENTS:
+        return 0
+    if not account_id:
+        return 0
+    from ami_api import STATE, now
+    matched = []
+    for wh in STATE["webhooks"].values():
+        if wh.get("account_id") != account_id or wh.get("status") != "active":
+            continue
+        ev = wh.get("events") or ["*"]
+        if "*" in ev or event in ev:
+            matched.append(wh)
+    if not matched:
+        return 0
+    return _dispatch(event, matched, {"account_id": account_id}, data, now())
+
+
+def _dispatch(event: str, matched: list[dict], scope: dict,
+              data: dict, ts: str) -> int:
+    """Submitter común para MID-scoped y account-scoped."""
     payload = {
         "event": event,
-        "delivered_at": now(),
-        "mid": mid,
+        "delivered_at": ts,
+        **scope,
         "data": data,
     }
     body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    # Submitter al pool acotado en lugar de spawn ilimitado de threads daemon.
     for wh in matched:
         _EXECUTOR.submit(
             _deliver_with_retries,

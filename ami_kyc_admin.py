@@ -296,12 +296,19 @@ function reviewerName() {
   return n;
 }
 
+// Lee el CSRF token (cookie NO-HttpOnly) y lo manda como header
+// X-CSRF-Token. Patrón double-submit-cookie estándar.
+function csrfToken() {
+  var match = document.cookie.match(/(?:^|;\s*)ami-kyc-csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
 async function verifyKyc(id) {
   if (!confirm('¿Verificar KYC ' + id + '?')) return;
   var r = await fetch('/v1/admin/kyc/' + id + '/verify', {
     method: 'POST',
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
     body: JSON.stringify({ reviewer: reviewerName() }),
   });
   if (r.ok) location.reload();
@@ -314,7 +321,7 @@ async function rejectKyc(id) {
   var r = await fetch('/v1/admin/kyc/' + id + '/reject', {
     method: 'POST',
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
     body: JSON.stringify({ reason: reason, reviewer: reviewerName() }),
   });
   if (r.ok) location.reload();
