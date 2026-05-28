@@ -388,59 +388,6 @@ def render_sip_interconnect_page() -> str:
   </ol>
 </section>
 
-<!-- BRIEF DANIEL -->
-<section>
-  <h2><span class="num">15</span>Brief privado para Daniel</h2>
-  <div class="brief">
-    <h3>Estructura sugerida de la conversación (16:30)</h3>
-    <ol>
-      <li><strong>Min 0-5 · contexto</strong> — Resumen 2 frases de qué es AMI y qué hace este trunk:
-      "El trunk es la pieza que conecta nuestro Asterisk con vuestro SBC. Por ahí pasan las llamadas
-      del agente AI al PSTN y de vuelta. Hoy queremos cerrar los 13 parámetros del documento."</li>
-
-      <li><strong>Min 5-25 · sección 02 (Parámetros)</strong> — Repasar la tabla punto por punto.
-      Si Javier insiste en REGISTER, OK. Si prefiere IP-based, también — necesitamos saber la IP
-      fija del VPS ANTES de fase 1.</li>
-
-      <li><strong>Min 25-40 · sección 04 (Codecs) + 05 (SRTP)</strong> — Defender <code>alaw</code>
-      como primario. Si exigen G.729, hablar de licencia (~25€/canal) o transcoding. SRTP: solo si
-      lo exigen.</li>
-
-      <li><strong>Min 40-50 · sección 03 (Numeración) + 08 (Headers)</strong> — Cerrar formato
-      E.164 exacto. Es la fuente más común de bugs en interconexión.</li>
-
-      <li><strong>Min 50-60 · sección 13 (Test plan)</strong> — Acordar fecha para T01. Si quieren
-      mostrarse rápidos, propón <strong>el viernes 30/05</strong> para empezar tests.</li>
-    </ol>
-
-    <h3 style="margin-top:1.2rem;">Banderas rojas (cosas que pueden retrasarte)</h3>
-    <ul style="color:var(--ink);">
-      <li>Si te dicen "necesitamos un PoP en Colombia" — significa que su SBC no admite peering
-      internacional. Sale más caro (VPS en CO) y tarda más (proveedor local). Pregunta si pueden
-      hacer una excepción durante PoC.</li>
-      <li>Si exigen TLS + SRTP + mutual auth desde día 1 — añade 3-5 días de setup. Empuja a
-      "lo activamos en fase 2 producción, PoC va en UDP plano".</li>
-      <li>Si el código SIP/RTP de su SBC es "propietario" (no estándar Asterisk-friendly) —
-      pedir captura PCAP de un ejemplo para entender qué dialect hablan.</li>
-    </ul>
-
-    <h3 style="margin-top:1.2rem;">Cierres "verdes"</h3>
-    <ul style="color:var(--ink);">
-      <li>Si responde TODO sin pega: <strong>haz que se comprometa a entregar las creds y la IP
-      del SBC al final de la sesión</strong> (no "te lo mando esta semana").</li>
-      <li>Si te dicen "podemos hacerlo desde ya": cierra el slot del <strong>viernes 30/05
-      para T01-T03</strong>.</li>
-      <li>Si el rango de numeración es generoso (50+ números): plantea expandir scope PoC con
-      múltiples agentes desde el inicio.</li>
-    </ul>
-
-    <h3 style="margin-top:1.2rem;">Frase de cierre técnica</h3>
-    <p style="color:var(--ink);">"Cuando tengamos los 13 parámetros del documento cerrados, el
-    setup del trunk son ~2 horas de configuración por nuestro lado. El bottleneck son las creds
-    y el número PoC — si nos los pasáis hoy o mañana, T01 podemos hacerlo el viernes."</p>
-  </div>
-</section>
-
 </div>
 </body>
 </html>"""

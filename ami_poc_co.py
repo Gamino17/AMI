@@ -443,57 +443,9 @@ def render_poc_co_page() -> str:
   </details>
 </section>
 
-<!-- BRIEF DANIEL -->
-<section>
-  <h2><span class="num">06</span>Brief para ti (Daniel) · cómo defender cada punto</h2>
-  <p class="sub">Esta sección no se enseña en la pantalla principal; es tu cheat-sheet.</p>
-
-  <div class="brief">
-    <h3>Línea de pitch en 30 segundos</h3>
-    <p style="color:var(--ink);">"AMI es el protocolo abierto que permite que un agente AI obtenga
-    su propio número móvil real y opere SMS y voz de forma autónoma. Toda la pieza de
-    contratación es real — KYC, firma, alta en sistemas del operador. Lo que sustituimos en cada
-    país es solo el partner telco. En Colombia queremos hacer una PoC contigo en tres semanas
-    para validar SMS bidireccional, voz bidireccional y un caso de uso típico: agente AI
-    recibiendo OTP."</p>
-
-    <h3 style="margin-top:1.4rem;">Preguntas críticas y respuestas listas</h3>
-    <ul>
-      <li><strong>"¿Por qué AMI y no un servicio SaaS existente?"</strong> → Los SaaS existentes
-      son numeración virtual o trunk para humanos; ninguno expone API que un agente AI pueda
-      consumir autónomamente con KYC programático.</li>
-      <li><strong>"¿En qué fase está el código?"</strong> → Backend production-ready: 409
-      tests verde, CI en Python 3.11/3.12, multi-tenant, KYC con email+SMS, backup automático,
-      logging JSON estructurado, webhooks account-scoped, panel admin con CSRF.</li>
-      <li><strong>"¿Es bridge-by-API real?"</strong> → Sí. <code>pjsip.conf</code> con endpoint
-      cliente genérico, <code>extensions.conf</code> con Dial dinámico al
-      <code>callback_sip_uri</code>, <code>rtp.conf</code> con rango y keepalive. AMI no monta
-      STT/TTS; lo hace el agente.</li>
-      <li><strong>"¿Y la regulación CRC / habeas data Ley 1581?"</strong> → KYC se hace contra
-      DNI o cédula del rep legal, datos cifrados en disco (0o600), retención 90d con purga
-      automática RGPD-style. Para CRC específico, vamos con el partner que tiene la licencia
-      operador local.</li>
-      <li><strong>"¿Cuándo podéis arrancar?"</strong> → Cuando ellos nos den creds SMPP + SIP +
-      IP whitelist + 1 número PoC. Esa semana levantamos infra. Semana siguiente integración.
-      Tercera demo.</li>
-    </ul>
-
-    <h3 style="margin-top:1.4rem;">Qué pedir TÚ a Javier Cruz</h3>
-    <ul>
-      <li>Confirmación del codec preferido del SBC (g711a vs ulaw vs g729 con licencia).</li>
-      <li>Si exigen SRTP/TLS para la señalización SIP.</li>
-      <li>Rango de numeración disponible para el PoC y el coste por número.</li>
-      <li>Si tienen SMSC propio o relay vía un tercero (afecta latencia OTP).</li>
-      <li>Quién hace la verificación KYC: ellos (con su flow existente) o nosotros (con el
-      panel KYC de AMI). Recomendación: nosotros, así el agente AI tiene control end-to-end.</li>
-      <li>Si quieren coemitir webhook events o si AMI es proxy único.</li>
-    </ul>
-  </div>
-</section>
-
 <!-- LIVE DEMO -->
 <section>
-  <h2><span class="num">07</span>Demo en vivo · flujo end-to-end</h2>
+  <h2><span class="num">06</span>Demo en vivo · flujo end-to-end</h2>
   <p class="sub">Ejecuta los pasos contra el backend en modo mock — toda la contratación + KYC
   es real, solo el SMS final se simula. Para enseñar el shape del flujo a Javier Cruz en
   pantalla.</p>
