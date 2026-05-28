@@ -663,9 +663,9 @@ def _slides() -> list[dict]:
                     <p><span data-lang="es">Lead de Parallax IEI. Diseño de producto, arquitectura del protocolo, GTM.</span><span data-lang="en">Lead at Parallax IEI. Product design, protocol architecture, GTM.</span></p>
                   </div>
                   <div class="pitch-card">
-                    <h3>Jaime</h3>
+                    <h3>Juan Carlos</h3>
                     <p class="big"><span data-lang="es">Telco + Operaciones</span><span data-lang="en">Telco + Operations</span></p>
-                    <p><span data-lang="es">Partner. Acceso a infraestructura telco real, peering con operadores, operación carrier-grade.</span><span data-lang="en">Partner. Access to real telco infrastructure, carrier peering, carrier-grade operations.</span></p>
+                    <p><span data-lang="es">Partner. Licencia de operador, infraestructura telco real, peering con operadores, operación carrier-grade.</span><span data-lang="en">Partner. Operator license, real telco infrastructure, carrier peering, carrier-grade operations.</span></p>
                   </div>
                   <div class="pitch-card">
                     <h3>[+]</h3>
