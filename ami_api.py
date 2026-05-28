@@ -36,6 +36,7 @@ import ami_backup
 import ami_poc_co
 import ami_sip_interconnect
 import ami_internal_brief
+import ami_vps_runbook
 import ami_log
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
@@ -169,7 +170,7 @@ API_KEY = os.environ.get("AMI_API_KEY") or None
 ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/poc-co/sip", "/internal/brief-co", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/poc-co/sip", "/internal/brief-co", "/internal/vps-co", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/waitlist")
 PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject))$")
@@ -7057,6 +7058,16 @@ class Handler(BaseHTTPRequestHandler):
                     "o entra primero al <a href='/panel/kyc' style='color:#5dd1ff'>panel KYC</a>.</p>"
                     "</body></html>")
             return respond_html(self, 200, ami_internal_brief.render_internal_brief_page())
+        if p == "/internal/vps-co":
+            # Runbook para provisionar el VPS de Asterisk/Kannel con IP fija.
+            # Privado: revela infra interna + variables. Auth admin obligatorio.
+            if not check_kyc_admin_auth(self):
+                return respond_html(self, 401,
+                    "<html><body style='font-family:sans-serif;background:#06060a;color:#ededf2;padding:3rem;text-align:center'>"
+                    "<h2>401 · admin auth requerido</h2>"
+                    "<p>Abre <code>/internal/vps-co?key=&lt;AMI_ADMIN_KEY&gt;</code>.</p>"
+                    "</body></html>")
+            return respond_html(self, 200, ami_vps_runbook.render_vps_runbook_page())
         if p == "/v1/admin/waitlist":
             # Listado para admin (auth: AMI_ADMIN_KEY).
             if not check_admin_auth(self):
