@@ -33,6 +33,7 @@ import ami_kyc_admin
 import ami_kyc_storage
 import ami_notify
 import ami_backup
+import ami_poc_co
 import ami_log
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
@@ -130,7 +131,17 @@ COUNTRIES = {
         "capabilities": ["sms", "voice", "data", "whatsapp_ready"],
         "price": {"monthly": 8.90, "setup": 5.00, "currency": "EUR"},
         "activation_time": "mock: immediate after signature",
-    }
+        "msisdn_prefix": "+34",
+        "id_document_label": {"es": "DNI / NIE", "en": "National ID"},
+    },
+    "CO": {
+        "sim_types": ["eSIM", "SIM"],
+        "capabilities": ["sms", "voice", "data", "whatsapp_ready"],
+        "price": {"monthly": 32000, "setup": 18000, "currency": "COP"},
+        "activation_time": "mock: immediate after signature",
+        "msisdn_prefix": "+57",
+        "id_document_label": {"es": "Cédula de Ciudadanía", "en": "National ID (Cédula)"},
+    },
 }
 
 # Máquina de estados de SIMRequest (spec §17.6).
@@ -156,7 +167,7 @@ API_KEY = os.environ.get("AMI_API_KEY") or None
 ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/waitlist")
 PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject))$")
@@ -7023,6 +7034,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/security":
             # Whitepaper de seguridad — chrome inline ya incluido.
             return respond_html(self, 200, ami_security_page.render_security_page(lang=lang))
+        if p == "/poc-co":
+            # Página de la PoC con el partner CO — usada en la reunión técnica
+            # con Julián / Javier Cruz. Standalone (no chrome) para que la
+            # narrativa sea full-screen.
+            return respond_html(self, 200, ami_poc_co.render_poc_co_page())
         if p == "/v1/admin/waitlist":
             # Listado para admin (auth: AMI_ADMIN_KEY).
             if not check_admin_auth(self):
