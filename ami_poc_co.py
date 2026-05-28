@@ -180,6 +180,15 @@ def render_poc_co_page() -> str:
 <body>
 <div class="wrap">
 
+<!-- BANNER REU SIP -->
+<div style="background:linear-gradient(180deg,rgba(139,108,255,0.10),rgba(93,209,255,0.06));border:1px solid rgba(139,108,255,0.30);border-radius:12px;padding:1rem 1.4rem;margin-bottom:2rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;">
+  <div>
+    <div style="font-family:var(--mono);font-size:0.7rem;color:var(--accent);text-transform:uppercase;letter-spacing:0.18em;margin-bottom:0.3rem;">Sesión 2026-05-28 · 16:30</div>
+    <div style="font-size:1rem;font-weight:600;">Revisión Troncal SIP — abrir spec técnica completa</div>
+  </div>
+  <a href="/poc-co/sip" style="background:linear-gradient(180deg,#9d80ff,#7a5cff);color:white;padding:0.7rem 1.2rem;border-radius:8px;font-weight:600;font-size:0.9rem;">SIP Interconnect Spec →</a>
+</div>
+
 <!-- HERO -->
 <section class="hero" style="border-top:0;padding-top:0">
   <div class="eyebrow">prueba de concepto · Colombia</div>

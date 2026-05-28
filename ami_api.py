@@ -34,6 +34,7 @@ import ami_kyc_storage
 import ami_notify
 import ami_backup
 import ami_poc_co
+import ami_sip_interconnect
 import ami_log
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
@@ -167,7 +168,7 @@ API_KEY = os.environ.get("AMI_API_KEY") or None
 ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/poc-co/sip", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/waitlist")
 PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject))$")
@@ -7039,6 +7040,10 @@ class Handler(BaseHTTPRequestHandler):
             # con Julián / Javier Cruz. Standalone (no chrome) para que la
             # narrativa sea full-screen.
             return respond_html(self, 200, ami_poc_co.render_poc_co_page())
+        if p == "/poc-co/sip":
+            # SIP Interconnect Spec — detalle troncal SIP para la reunión
+            # "Revisión Troncal SIP" 2026-05-28 16:30.
+            return respond_html(self, 200, ami_sip_interconnect.render_sip_interconnect_page())
         if p == "/v1/admin/waitlist":
             # Listado para admin (auth: AMI_ADMIN_KEY).
             if not check_admin_auth(self):
