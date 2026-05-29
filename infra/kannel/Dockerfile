@@ -20,11 +20,10 @@ RUN apt-get update \
       ca-certificates \
       gettext-base \
  && apt-get clean \
- && rm -rf /var/lib/apt/lists/*
-
-# El paquete crea el usuario `kannel`. Mantenemos el spool dir con permisos
-# correctos (montado como volume en compose).
-RUN mkdir -p /var/spool/kannel /var/log/kannel \
+ && rm -rf /var/lib/apt/lists/* \
+ && (getent group kannel >/dev/null || groupadd -r kannel) \
+ && (id -u kannel >/dev/null 2>&1 || useradd -r -g kannel -d /var/spool/kannel -s /usr/sbin/nologin kannel) \
+ && mkdir -p /var/spool/kannel /var/log/kannel \
  && chown -R kannel:kannel /var/spool/kannel /var/log/kannel
 
 EXPOSE 13000 13013
