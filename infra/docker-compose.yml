@@ -81,9 +81,13 @@ services:
     networks: [ami_net]
 
   asterisk:
-    # Asterisk 20 LTS. Si el partner requiere otra versión por compatibilidad
-    # con su trunk, ajusta el tag aquí.
-    image: andrius/asterisk:20.5.2
+    # Imagen propia: Debian bookworm + apt-get install asterisk (Asterisk 20 LTS).
+    # Las imágenes comunitarias de Docker Hub van y vienen — Dockerfile
+    # propio garantiza reproducibilidad.
+    build:
+      context: ./asterisk
+      dockerfile: Dockerfile
+    image: ami-asterisk:local
     container_name: asterisk
     restart: unless-stopped
     volumes:
