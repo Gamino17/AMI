@@ -42,25 +42,35 @@ COPY --chmod=0755 <<'EOF' /usr/local/bin/start-asterisk.sh
 #!/bin/bash
 set -e
 
-# Confs que pueden contener placeholders ${VAR}. Sobrescribimos solo si
-# el archivo tiene placeholders (para no romper confs estáticos).
-for f in /etc/asterisk/pjsip.conf /etc/asterisk/extensions.conf; do
-  if [ -f "$f" ] && grep -q '\${' "$f"; then
-    tmp="$(mktemp)"
-    envsubst < "$f" > "$tmp"
-    cat "$tmp" > "$f.rendered"
-    cp "$f.rendered" "$f"
-    rm -f "$tmp" "$f.rendered"
-  fi
-done
+# Render: copia los templates de /etc/asterisk-templates/ a /etc/asterisk/,
+# expandiendo placeholders ${VAR} con envsubst. Los templates están RO
+# (bind-mounted desde el host); /etc/asterisk/ es RW dentro del container.
+TEMPLATES_DIR=/etc/asterisk-templates
+TARGET_DIR=/etc/asterisk
+
+if [ -d "$TEMPLATES_DIR" ]; then
+  for src in "$TEMPLATES_DIR"/*.conf; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src")"
+    dst="$TARGET_DIR/$name"
+    if grep -q '\${' "$src" 2>/dev/null; then
+      envsubst < "$src" > "$dst"
+    else
+      cp "$src" "$dst"
+    fi
+    chown asterisk:asterisk "$dst" 2>/dev/null || true
+    chmod 0644 "$dst" 2>/dev/null || true
+  done
+fi
 
 # Permisos del directorio de scripts del dialplan (curl + parser inbound).
 if [ -d /var/lib/asterisk/scripts ]; then
   chmod -R +x /var/lib/asterisk/scripts || true
 fi
 
-# Foreground, verbose nivel 3, sin consola interactiva (-T) ni TTY (-C).
-exec asterisk -f -vvv -p -U asterisk -G asterisk
+# Foreground, verbose nivel 3, drop privs a user asterisk. Sin -p (priority
+# scheduler) porque requiere CAP_SYS_NICE que el container no tiene.
+exec asterisk -f -vvv -U asterisk -G asterisk
 EOF
 
 CMD ["/usr/local/bin/start-asterisk.sh"]
