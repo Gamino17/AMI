@@ -15,8 +15,6 @@
 #
 # Para volver a modo mock (sin telco real):
 #   AMI_TELCO_MODE=mock docker compose up ami_api
-#
-version: "3.9"
 
 services:
   ami_api:
@@ -51,8 +49,12 @@ services:
     networks: [ami_net]
 
   kannel:
-    # Kannel oficial; si tu partner pide una versión concreta, fijar tag aquí.
-    image: kannel/kannel:1.4.5
+    # Imagen propia: Debian + apt-get install kannel (no existe imagen oficial
+    # mantenida en Docker Hub bajo `kannel/kannel`). Ver infra/kannel/Dockerfile.
+    build:
+      context: ./kannel
+      dockerfile: Dockerfile
+    image: ami-kannel:local
     container_name: kannel
     restart: unless-stopped
     volumes:
