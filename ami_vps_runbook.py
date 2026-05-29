@@ -255,40 +255,27 @@ ls -la</pre>
 <!-- STEP 6 -->
 <div class="step">
   <h3><span class="badge">6</span>Crear el archivo <code>.env</code> con la config del PoC</h3>
-  <p class="why">Estos son los valores. Las creds del partner CO se rellenan tras la reunión — déjalos vacíos por ahora si aún no los tienes, el modo mock arranca igual.</p>
-<pre class="cmd">cat &gt; .env &lt;&lt;'EOF'
-<span class="c"># ====== AMI API (apunta al servicio Render) ======</span>
-<span class="k">AMI_PUBLIC_URL</span>=https://protocolami.com
-<span class="k">AMI_API_KEY</span>=&lt;poner aquí AMI_API_KEY que tienes en Render&gt;
-<span class="k">AMI_TELCO_MODE</span>=live
-<span class="k">AMI_TELCO_INBOUND_KEY</span>=&lt;poner aquí AMI_TELCO_INBOUND_KEY de Render&gt;
-
-<span class="c"># ====== IP pública del propio VPS (esta máquina) ======</span>
-<span class="k">EXTERNAL_IP</span>=&lt;tu IP Hetzner&gt;
-
-<span class="c"># ====== Kannel · creds que te pase Javier Cruz ======</span>
-<span class="k">SMPP_HOST</span>=&lt;smsc.partner.co&gt;
-<span class="k">SMPP_PORT</span>=2775
-<span class="k">SMPP_SYSTEM_ID</span>=&lt;system_id&gt;
-<span class="k">SMPP_PASSWORD</span>=&lt;password&gt;
-<span class="k">SMPP_SYSTEM_TYPE</span>=
-<span class="k">SMPP_SOURCE_TON</span>=1
-<span class="k">SMPP_SOURCE_NPI</span>=1
-<span class="k">KANNEL_SENDSMS_USER</span>=ami
-<span class="k">KANNEL_SENDSMS_PASSWORD</span>=$(openssl rand -hex 24)
-
-<span class="c"># ====== Asterisk · trunk SIP del partner CO ======</span>
-<span class="k">SIP_TRUNK_HOST</span>=&lt;sbc.partner.co&gt;
-<span class="k">SIP_TRUNK_PORT</span>=5060
-<span class="k">SIP_TRUNK_USERNAME</span>=&lt;sip_user&gt;
-<span class="k">SIP_TRUNK_PASSWORD</span>=&lt;sip_password&gt;
-
-<span class="c"># ====== ARI (Asterisk REST Interface) ======</span>
-<span class="k">ARI_USERNAME</span>=ami
-<span class="k">ARI_PASSWORD</span>=$(openssl rand -hex 24)
-EOF
-chmod 600 .env</pre>
-  <p><strong>Acción manual</strong>: rellena <code>EXTERNAL_IP</code> con la IP que te dio Hetzner. El resto lo rellenas cuando Javier te pase las creds.</p>
+  <p class="why">El repo ya trae un template (<code>infra/.env.example</code>) con todas las
+  variables documentadas. Lo copias, lo editas, y a producción. Lo mínimo
+  imprescindible para arrancar: <code>EXTERNAL_IP</code> con la IP que te dio Hetzner.
+  El resto (SMPP, SIP del partner) lo rellenas cuando Javier te pase las creds.</p>
+<pre class="cmd">cd /opt/ami/infra
+cp .env.example .env
+chmod 600 .env
+nano .env       <span class="c"># o vim, lo que prefieras</span></pre>
+  <p>Variables a editar a mano dentro de <code>.env</code>:</p>
+  <ul>
+    <li><code>EXTERNAL_IP</code> = la IP pública que te dio Hetzner (obligatorio).</li>
+    <li><code>AMI_API_KEY</code> = misma que tienes en el dashboard de Render para <code>ami-mock-api</code>.</li>
+    <li><code>AMI_TELCO_INBOUND_KEY</code> = misma que en Render (genera con <code>openssl rand -hex 32</code> si aún no tienes).</li>
+    <li><code>AMI_PUBLIC_URL</code> = URL pública del backend Render (p.ej. <code>https://protocolami.com</code> o el host de Render).</li>
+    <li><code>SMPP_*</code> y <code>SIP_TRUNK_*</code> = pendientes, los rellenas con las creds de Javier Cruz tras la reunión. Mientras tanto, déjalos como están (placeholders).</li>
+    <li><code>KANNEL_SENDSMS_PASSWORD</code> y <code>ARI_PASSWORD</code> = cambia los defaults por algo random (<code>openssl rand -hex 24</code>). Son secretos del propio stack.</li>
+  </ul>
+  <p><strong>Genera los secretos en una línea:</strong></p>
+<pre class="cmd">echo "KANNEL_SENDSMS_PASSWORD=$(openssl rand -hex 24)"
+echo "ARI_PASSWORD=$(openssl rand -hex 24)"
+<span class="c"># Copia los valores generados al .env</span></pre>
 </div>
 
 <!-- STEP 7 -->
