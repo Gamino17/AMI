@@ -59,7 +59,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./kannel/kannel.conf:/etc/kannel/kannel.conf:ro
-      - ./kannel/sms-services.conf:/etc/kannel/sms-services.conf:ro
       - kannel_spool:/var/spool/kannel
     environment:
       # Estas envs las consume el plantillado de kannel.conf si tu imagen
