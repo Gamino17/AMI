@@ -1,15 +1,15 @@
-# Asterisk PBX desde apt de Debian bookworm.
+# Asterisk PBX desde apt de Ubuntu 24.04 (noble).
 #
-# Razón: no hay imagen oficial mantenida de Asterisk en Docker Hub. Las
-# comunitarias (andrius/asterisk, mlan/asterisk) van y vienen. El paquete
-# Debian `asterisk` instala Asterisk 20.x (LTS), que es la versión que
-# requerimos para PJSIP moderno.
+# Razón: no hay imagen oficial de Asterisk en Docker Hub. Las comunitarias
+# van y vienen. Debian bookworm removió Asterisk de main en una actualización
+# reciente (problemas de mantenedor) — Ubuntu noble sigue empaquetando
+# Asterisk 20.x (LTS) en main y es la base más estable hoy.
 #
 # Necesitamos curl + bash en el container porque el dialplan
 # (extensions.conf) lanza `curl` para notificar a AMI los cambios de estado
 # de llamada vía /v1/_telco/calls/*.
 
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
