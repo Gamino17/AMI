@@ -4,8 +4,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copiar el código fuente (no incluimos tests/, docs/, .venv/, etc.).
-COPY ami_api.py ami_mcp.py install.sh ./
+# Copiar TODOS los módulos ami_*.py (son ~30: webhooks, limits, panel,
+# storage, metrics, kyc, notify, backup, log, etc.) más el script install.
+# Antes solo se copiaban ami_api.py y ami_mcp.py, y los imports dentro
+# del backend fallaban con ModuleNotFoundError.
+COPY ami_*.py install.sh ./
 COPY ami_telco/ ./ami_telco/
 COPY docs/ ./docs/
 COPY requirements.txt ./
