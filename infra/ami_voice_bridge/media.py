@@ -235,6 +235,7 @@ class RtpSender:
         self.n_frames_emitted: int = 0   # frames de AUDIO real emitidos por tick()
         self.n_underruns: int = 0        # ticks en draining sin frame completo
         self.n_comfort_frames: int = 0   # frames de silencio inyectados
+        self.n_talkspurts: int = 0       # resumes de audio tras silencio (scatter)
         self.max_outbuf_depth: int = 0   # profundidad máxima del outbuf (bytes)
         self.n_state_transitions: int = 0
 
@@ -321,6 +322,8 @@ class RtpSender:
             frame = bytes(self.outbuf[:FRAME_BYTES])
             del self.outbuf[:FRAME_BYTES]
             marker = self._talkspurt_start or self._in_silence
+            if self._in_silence:
+                self.n_talkspurts += 1   # resume de audio tras un hueco de silencio
             self._in_silence = False
             self.n_frames_emitted += 1
             return self._emit(frame, marker=marker)
@@ -555,6 +558,11 @@ class MediaBridge:
         self._inbound_q: "asyncio.Queue[str]" = asyncio.Queue(maxsize=200)
         self._inbound_frames = 0
         self._inbound_drops = 0   # frames inbound descartados (drop-oldest)
+        # Instrumentación del path SALIENTE (openclaw->bridge por WS): mide la
+        # tasa REAL de entrega de openclaw para distinguir throughput vs jitter.
+        self._ws_media_frames = 0     # frames 'media' recibidos de openclaw
+        self._ws_media_bytes = 0      # bytes μ-law decodificados (audio real)
+        self._ws_decode_fail = 0      # payloads no-vacíos que no decodificaron (b64)
 
         self._closed = False
         self._tasks: set = set()
@@ -733,7 +741,13 @@ class MediaBridge:
                 ev = f.get("event")
                 if ev == "media":
                     media = f.get("media") or {}
-                    self.sender.feed(b64_decode_ulaw(media.get("payload", "")))
+                    payload_b64 = media.get("payload", "")
+                    decoded = b64_decode_ulaw(payload_b64)
+                    self._ws_media_frames += 1
+                    self._ws_media_bytes += len(decoded)
+                    if payload_b64 and not decoded:
+                        self._ws_decode_fail += 1
+                    self.sender.feed(decoded)
                 elif ev == "clear":
                     # Barge-in: descartar lo pendiente y rearmar marker.
                     self.sender.clear()
@@ -861,12 +875,14 @@ class MediaBridge:
         # cliente no consume a tiempo; latch=no -> Asterisk nunca envió RTP.
         s = self.sender
         log.info(
-            "media channel=%s stats: rtp_in=%d ws_out=%d underruns=%d "
-            "comfort=%d inbound_drops=%d outbuf_drops=%dB max_outbuf=%dB "
-            "latch=%s state=%s",
-            self.channel_id, self._inbound_frames, s.n_frames_emitted,
-            s.n_underruns, s.n_comfort_frames, self._inbound_drops,
-            s.n_outbuf_drops, s.max_outbuf_depth,
+            "media channel=%s stats: rtp_in=%d ws_media_frames=%d "
+            "ws_media_bytes=%d decode_fail=%d ws_out=%d talkspurts=%d "
+            "underruns=%d comfort=%d inbound_drops=%d outbuf_drops=%dB "
+            "max_outbuf=%dB latch=%s state=%s",
+            self.channel_id, self._inbound_frames, self._ws_media_frames,
+            self._ws_media_bytes, self._ws_decode_fail, s.n_frames_emitted,
+            s.n_talkspurts, s.n_underruns, s.n_comfort_frames,
+            self._inbound_drops, s.n_outbuf_drops, s.max_outbuf_depth,
             "yes" if self.latch.target() else "no", s.state,
         )
         log.info("media channel=%s puente cerrado (stream_sid=%s)",
