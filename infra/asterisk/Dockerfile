@@ -20,6 +20,7 @@ RUN apt-get update \
       bash \
       gettext-base \
       procps \
+      openssl \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
@@ -71,6 +72,26 @@ fi
 if [ -d /var/lib/asterisk/scripts ]; then
   chmod -R +x /var/lib/asterisk/scripts || true
 fi
+
+# Genera cert self-signed para el transport-tls si no existe. Lo usamos
+# para SIP-TLS OUTBOUND (Dial a sip:proj_xxx@sip.api.openai.com;transport=tls).
+# Asterisk valida el cert del peer remoto con el CA bundle del sistema
+# (ca-certificates), pero exige tener cert_file/priv_key_file propios para
+# poder arrancar el transport, incluso si solo lo usamos como cliente.
+KEYS_DIR=/etc/asterisk/keys
+mkdir -p "$KEYS_DIR"
+if [ ! -f "$KEYS_DIR/asterisk.crt" ] || [ ! -f "$KEYS_DIR/asterisk.key" ]; then
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$KEYS_DIR/asterisk.key" \
+    -out "$KEYS_DIR/asterisk.crt" \
+    -days 3650 \
+    -subj "/CN=ami-asterisk" \
+    -addext "subjectAltName=DNS:ami-asterisk,IP:127.0.0.1" \
+    >/dev/null 2>&1
+fi
+chown -R asterisk:asterisk "$KEYS_DIR" 2>/dev/null || true
+chmod 600 "$KEYS_DIR/asterisk.key" 2>/dev/null || true
+chmod 644 "$KEYS_DIR/asterisk.crt" 2>/dev/null || true
 
 # Foreground, verbose nivel 3, drop privs a user asterisk. Sin -p (priority
 # scheduler) porque requiere CAP_SYS_NICE que el container no tiene.
