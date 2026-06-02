@@ -182,12 +182,20 @@ def test_live_place_call_hits_ari_with_originate(live_adapter, telco_server, ami
     assert req["method"] == "POST"
     assert req["path"] == "/ari/channels"
     body = req["body"]
-    assert body["endpoint"].startswith("PJSIP/trunk_partner/sip:34611000000")
+    # Nuevo modelo: originamos el channel al callback_sip_uri del agente
+    # (en este caso OpenAI Realtime → endpoint estático openai_realtime),
+    # NO al PSTN target. El dialplan bridge_outbound hace el Dial al
+    # trunk_partner cuando el agente descuelga.
+    assert body["endpoint"] == "PJSIP/proj@openai_realtime"
     assert body["channelId"] == "call_test1"
-    assert body["app"] == "ami_voice"
-    args = json.loads(body["appArgs"])
-    assert args["callback_sip_uri"] == call["callback_sip_uri"]
-    assert args["ami_call_id"] == "call_test1"
+    assert body["context"] == "from_internal"
+    assert body["extension"] == "bridge_outbound"
+    assert body["priority"] == 1
+    assert body["variables"]["PSTN_TARGET"] == "34611000000"
+    assert body["variables"]["AMI_CALL_ID"] == "call_test1"
+    # Sin Stasis app (la quitamos)
+    assert "app" not in body
+    assert "appArgs" not in body
 
     # Y el backend grabó el telco_ref
     saved = ami_api_module.STATE["calls"]["call_test1"]
