@@ -563,6 +563,7 @@ class MediaBridge:
         self._ws_media_frames = 0     # frames 'media' recibidos de openclaw
         self._ws_media_bytes = 0      # bytes μ-law decodificados (audio real)
         self._ws_decode_fail = 0      # payloads no-vacíos que no decodificaron (b64)
+        self._ws_events: dict = {}    # conteo de TODOS los event types de openclaw
 
         self._closed = False
         self._tasks: set = set()
@@ -737,8 +738,10 @@ class MediaBridge:
             async for raw in self.ws:
                 f = decode_client_frame(raw)
                 if f is None:
+                    self._ws_events["<non-json>"] = self._ws_events.get("<non-json>", 0) + 1
                     continue
                 ev = f.get("event")
+                self._ws_events[ev] = self._ws_events.get(ev, 0) + 1
                 if ev == "media":
                     media = f.get("media") or {}
                     payload_b64 = media.get("payload", "")
@@ -878,12 +881,12 @@ class MediaBridge:
             "media channel=%s stats: rtp_in=%d ws_media_frames=%d "
             "ws_media_bytes=%d decode_fail=%d ws_out=%d talkspurts=%d "
             "underruns=%d comfort=%d inbound_drops=%d outbuf_drops=%dB "
-            "max_outbuf=%dB latch=%s state=%s",
+            "max_outbuf=%dB ws_events=%s latch=%s state=%s",
             self.channel_id, self._inbound_frames, self._ws_media_frames,
             self._ws_media_bytes, self._ws_decode_fail, s.n_frames_emitted,
             s.n_talkspurts, s.n_underruns, s.n_comfort_frames,
             self._inbound_drops, s.n_outbuf_drops, s.max_outbuf_depth,
-            "yes" if self.latch.target() else "no", s.state,
+            dict(self._ws_events), "yes" if self.latch.target() else "no", s.state,
         )
         log.info("media channel=%s puente cerrado (stream_sid=%s)",
                  self.channel_id, self.stream_sid)
