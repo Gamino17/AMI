@@ -652,10 +652,10 @@ def test_start_orquesta_externalmedia_bridge_y_ws(monkeypatch):
     assert "ami_voice_bridge" in em_url
     assert str(snap["rtp_port"]) in em_url
 
-    # addChannel une el canal SIP y el canal externalMedia (ambos channel=).
-    add_url = ari_urls[add_idx]
-    assert "ch_sip" in add_url
-    assert "UnicastRTP" in add_url  # em id url-encodeado
+    # addChannel: una llamada por canal (SIP y externalMedia entran ambos).
+    add_urls = [u for u in ari_urls if "/addChannel" in u]
+    assert any("ch_sip" in u for u in add_urls), "el canal SIP debe entrar al bridge"
+    assert any("UnicastRTP" in u for u in add_urls), "el canal externalMedia debe entrar"
 
     # Frame 'start' al cliente con el callSid == AMI_CALL_ID.
     assert snap["sent"], "debe enviar el frame start al WS"

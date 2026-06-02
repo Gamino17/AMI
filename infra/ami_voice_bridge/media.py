@@ -517,15 +517,19 @@ class MediaBridge:
             self.bridge_id = self._json_id(raw)
             if not self.bridge_id:
                 raise RuntimeError(f"bridge create sin id: {raw[:200]!r}")
-            add_qs = urllib.parse.urlencode([
-                ("channel", self.sip_channel_id),
-                ("channel", self.em_channel_id),
-            ])  # múltiples channel=, NO CSV
-            status, raw = await bridge._ari_request(
-                "POST", f"{base}/bridges/{urllib.parse.quote(self.bridge_id)}/addChannel?{add_qs}"
-            )
-            if not (200 <= status < 300):
-                raise RuntimeError(f"addChannel status={status} body={raw[:200]!r}")
+            # Añadir CADA canal con su propia llamada addChannel. Los `channel=`
+            # repetidos en una sola request hacían que Asterisk 20 añadiera SOLO
+            # el último (el externalMedia) -> el canal SIP del llamante no entraba
+            # al bridge -> silencio. Dos requests garantizan que ambos entran.
+            for _ch in (self.sip_channel_id, self.em_channel_id):
+                aq = urllib.parse.urlencode({"channel": _ch})
+                status, raw = await bridge._ari_request(
+                    "POST",
+                    f"{base}/bridges/{urllib.parse.quote(self.bridge_id)}/addChannel?{aq}",
+                )
+                if not (200 <= status < 300):
+                    raise RuntimeError(
+                        f"addChannel({_ch}) status={status} body={raw[:200]!r}")
             log.info(
                 "media channel=%s bridge=%s addChannel(sip=%s, em=%s) OK",
                 self.channel_id, self.bridge_id, self.sip_channel_id, self.em_channel_id,
