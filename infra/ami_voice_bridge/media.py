@@ -43,6 +43,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import random
 import struct
 import urllib.parse
@@ -65,6 +66,14 @@ FRAME_MS: int = 20                # duración de un frame en ms
 PACER_INTERVAL: float = 0.020     # cadencia del pacer de salida (20 ms exactos)
 RTP_VERSION: int = 2              # RTP versión 2 (RFC 3550)
 RTP_HEADER_LEN: int = 12          # cabecera base sin CSRC/extension
+
+# Silencio G.711 μ-law: 0xFF es el idle code canónico (decodifica a linear +0).
+# G.711 μ-law transmite el valor complementado; la muestra cero se transmite
+# como 0xFF. Lo usamos como comfort noise (silencio digital limpio) en underrun.
+ULAW_SILENCE_BYTE: int = 0xFF
+SILENCE_FRAME: bytes = bytes([ULAW_SILENCE_BYTE]) * FRAME_BYTES  # comfort noise 160 B
+# Prebuffer del jitter buffer de salida (ms). Estándar telefonía 40-80 ms.
+DEFAULT_JITTER_MS: int = 60
 
 
 # ============================================================================
@@ -177,55 +186,149 @@ class RtpSender:
     """Bufferiza μ-law del WS y emite paquetes RTP de 160 B a ritmo de 20 ms.
 
     Lógica PURA, sin red ni reloj real: el "reloj" es implícito (el caller
-    invoca :meth:`next_packet` una vez por tick de 20 ms). seq arranca
-    aleatorio (uint16) y ts arranca aleatorio (uint32) según RFC 3550 §5.1.
-    El SSRC es fijo por sesión.
+    invoca :meth:`tick` una vez por tick de 20 ms). seq arranca aleatorio
+    (uint16) y ts arranca aleatorio (uint32) según RFC 3550 §5.1. El SSRC es
+    fijo por sesión.
 
-    Round-trip testeable: ``feed(N*160)`` seguido de N ``next_packet()`` da
-    seq creciente, ts += 160, primer ``marker=1`` y el resto ``marker=0``;
-    un ``clear()`` intermedio descarta lo pendiente y rearma el marker.
+    DOS APIs, distintas responsabilidades:
+
+      * :meth:`next_packet` — unidad PURA de bajo nivel: "dame un frame de
+        AUDIO si hay ≥160 B, si no ``None``". NO consulta el estado de la FSM.
+        Es el helper histórico (tests de round-trip).
+      * :meth:`tick` — lo que el pacer usa EN PRODUCCIÓN: jitter buffer FSM
+        (``buffering`` -> ``draining``) + comfort noise en underrun para
+        mantener el flujo RTP CONTINUO a 20 ms (seq+1 y ts+160 SIEMPRE por
+        tick una vez arrancado). Absorbe las ráfagas del WS del cliente.
+
+    Round-trip testeable de ``next_packet``: ``feed(N*160)`` seguido de N
+    ``next_packet()`` da seq creciente, ts += 160, primer ``marker=1`` y el
+    resto ``marker=0``; un ``clear()`` intermedio descarta lo pendiente y
+    rearma el marker.
+
+    Jitter buffer (``tick``): hasta acumular ``prebuffer_bytes`` el sender está
+    en ``buffering`` (``tick`` -> ``None``, el stream no ha arrancado); al
+    alcanzarlo pasa a ``draining`` y ``tick`` SIEMPRE devuelve un paquete:
+    audio real si hay frame completo, o comfort noise (silencio μ-law) en
+    underrun. ``clear()`` (barge-in) vuelve a ``buffering`` para re-prebuffer.
     """
 
-    def __init__(self, ssrc: int) -> None:
+    def __init__(self, ssrc: int, prebuffer_frames: int = 3,
+                 max_outbuf_frames: int = 50) -> None:
         self.ssrc: int = ssrc & 0xFFFFFFFF
         self.seq: int = random.getrandbits(16)
         self.ts: int = random.getrandbits(32)
         self.outbuf: bytearray = bytearray()
         # El primer paquete tras arranque/clear lleva marker=1 (inicio de
-        # talkspurt). Se rearma con clear().
+        # talkspurt). Se rearma con clear() y al resumir audio tras silencio.
         self._talkspurt_start: bool = True
+        # --- jitter buffer FSM (path saliente, usado por tick()) ---
+        self.prebuffer_bytes: int = max(1, int(prebuffer_frames)) * FRAME_BYTES
+        # Tope del outbuf (drop-oldest): si el cliente entrega audio más rápido
+        # que tiempo real, acota la latencia (default ~1 s; openclaw pacea a
+        # 20 ms y no debería dispararlo). Nunca por debajo del prebuffer.
+        self.max_outbuf_bytes: int = max(
+            self.prebuffer_bytes, max(1, int(max_outbuf_frames)) * FRAME_BYTES)
+        self.n_outbuf_drops: int = 0     # bytes de audio viejo descartados (tope)
+        self.state: str = "buffering"   # "buffering" -> "draining"
+        self._in_silence: bool = False  # True tras inyectar comfort noise
+        # --- instrumentación (atributos planos, deterministas, asertables) ---
+        self.n_frames_emitted: int = 0   # frames de AUDIO real emitidos por tick()
+        self.n_underruns: int = 0        # ticks en draining sin frame completo
+        self.n_comfort_frames: int = 0   # frames de silencio inyectados
+        self.max_outbuf_depth: int = 0   # profundidad máxima del outbuf (bytes)
+        self.n_state_transitions: int = 0
 
     def feed(self, ulaw_bytes: bytes) -> None:
         """Acumula μ-law llegado del WS (puede venir en ráfaga / >160 B)."""
         if ulaw_bytes:
             self.outbuf.extend(ulaw_bytes)
+            # Tope superior (drop-oldest): si el cliente ráfaguea por encima de
+            # tiempo real, el outbuf crecería sin límite -> latencia creciente.
+            # Descartamos el audio MÁS VIEJO sobre el techo para acotarla.
+            if len(self.outbuf) > self.max_outbuf_bytes:
+                exceso = len(self.outbuf) - self.max_outbuf_bytes
+                del self.outbuf[:exceso]
+                self.n_outbuf_drops += exceso
+            if len(self.outbuf) > self.max_outbuf_depth:
+                self.max_outbuf_depth = len(self.outbuf)
 
     def clear(self) -> None:
         """Descarta el buffer pendiente y rearma el marker bit.
 
         Corresponde al evento ``{'event':'clear'}`` del cliente: tira lo que
         no se ha enviado (barge-in) y el próximo paquete reinicia talkspurt.
+        Además resetea la FSM a ``buffering``: el nuevo talkspurt re-acumula el
+        jitter buffer antes de re-arrancar (más robusto ante el burst que suele
+        seguir a un barge-in). ``next_packet`` NO consulta ``self.state``, así
+        que su semántica histórica (None en underrun) no cambia.
         """
         self.outbuf.clear()
         self._talkspurt_start = True
+        self._in_silence = False
+        if self.state != "buffering":
+            self.state = "buffering"
+            self.n_state_transitions += 1
 
-    def next_packet(self) -> "bytes | None":
-        """Devuelve un RTP de 160 B si hay ≥20 ms bufferizados, si no ``None``.
+    def _emit(self, frame: bytes, marker: bool) -> bytes:
+        """Construye un RTP con la cabecera actual y avanza seq+1 / ts+160.
 
-        Es la unidad PURA que el pacer-task llama cada 20 ms. NO emite ráfagas
-        ni medio-frames: si ``len(outbuf) < 160`` devuelve ``None`` (aún no hay
-        un frame completo). marker=1 solo en el primer paquete del talkspurt.
+        Helper compartido por :meth:`next_packet` y :meth:`tick` para no
+        duplicar el avance de la secuencia/timestamp. Tras emitir, el talkspurt
+        deja de ser "start" (el marker solo se rearma con clear()/silencio).
         """
-        if len(self.outbuf) < FRAME_BYTES:
-            return None
-        frame = bytes(self.outbuf[:FRAME_BYTES])
-        del self.outbuf[:FRAME_BYTES]
-        marker = self._talkspurt_start
         pkt = build_rtp(frame, self.seq, self.ts, self.ssrc, marker=marker)
         self.seq = (self.seq + 1) & 0xFFFF
         self.ts = (self.ts + SAMPLES_PER_FRAME) & 0xFFFFFFFF
         self._talkspurt_start = False
         return pkt
+
+    def next_packet(self) -> "bytes | None":
+        """Devuelve un RTP de 160 B si hay ≥20 ms bufferizados, si no ``None``.
+
+        Unidad PURA de bajo nivel: "dame un frame de AUDIO si lo hay". NO
+        consulta la FSM (``self.state``): si ``len(outbuf) < 160`` devuelve
+        ``None`` (aún no hay un frame completo). marker=1 solo en el primer
+        paquete del talkspurt. En producción el pacer usa :meth:`tick`, no
+        este método; ``next_packet`` queda como helper de bajo nivel.
+        """
+        if len(self.outbuf) < FRAME_BYTES:
+            return None
+        frame = bytes(self.outbuf[:FRAME_BYTES])
+        del self.outbuf[:FRAME_BYTES]
+        return self._emit(frame, marker=self._talkspurt_start)
+
+    def tick(self) -> "bytes | None":
+        """Emisión por tick de 20 ms del pacer. FSM jitter buffer + comfort noise.
+
+        - ``buffering``: ``None`` hasta acumular ``prebuffer_bytes``; al
+          alcanzarlo pasa a ``draining`` y emite el 1er frame de audio
+          (marker=1, talkspurt). El ``None`` aquí es el prebuffer inicial, NO
+          un underrun: el stream RTP todavía no ha arrancado.
+        - ``draining``: SIEMPRE devuelve un paquete (nunca ``None``). Audio real
+          si hay ≥160 B (marker=1 al resumir tras silencio); si no, COMFORT
+          NOISE (silencio μ-law 0xFF*160, marker=0). seq+1 y ts+160 SIEMPRE por
+          tick: el RTP es continuo y el ts avanza por TIEMPO REAL (no se rezaga
+          del reloj de Asterisk), evitando los cortes/glitches.
+        """
+        if self.state == "buffering":
+            if len(self.outbuf) < self.prebuffer_bytes:
+                return None  # aún acumulando prebuffer; el stream no ha arrancado
+            self.state = "draining"
+            self.n_state_transitions += 1
+            # cae a draining este mismo tick para emitir ya el primer audio
+        # --- draining: emite SIEMPRE ---
+        if len(self.outbuf) >= FRAME_BYTES:
+            frame = bytes(self.outbuf[:FRAME_BYTES])
+            del self.outbuf[:FRAME_BYTES]
+            marker = self._talkspurt_start or self._in_silence
+            self._in_silence = False
+            self.n_frames_emitted += 1
+            return self._emit(frame, marker=marker)
+        # underrun: el WS no entregó a tiempo -> comfort noise, flujo continuo
+        self.n_underruns += 1
+        self.n_comfort_frames += 1
+        self._in_silence = True
+        return self._emit(SILENCE_FRAME, marker=False)
 
     def drain_padding(self) -> None:
         """Descarta un resto < 160 B al final (no se rellena con silencio).
@@ -421,7 +524,21 @@ class MediaBridge:
         # streamSid libre por sesión (el callSid es el invariante, no éste).
         self.stream_sid = f"stream_{uuid4().hex}"
         self.ssrc = new_ssrc()
-        self.sender = RtpSender(self.ssrc)
+        # Prebuffer del jitter buffer de salida derivado de env (ms -> frames).
+        # Leemos os.environ directo para no acoplar __init__ al CONFIG de
+        # bridge; estándar telefonía 40-80 ms, default 60 ms (~3 frames).
+        try:
+            jitter_ms = int(os.environ.get("AMI_VOICE_JITTER_MS", DEFAULT_JITTER_MS))
+        except (TypeError, ValueError):
+            jitter_ms = DEFAULT_JITTER_MS
+        prebuffer_frames = max(1, round(jitter_ms / FRAME_MS))
+        try:
+            max_lat_ms = int(os.environ.get("AMI_VOICE_MAX_LATENCY_MS", "1000"))
+        except (TypeError, ValueError):
+            max_lat_ms = 1000
+        max_outbuf_frames = max(prebuffer_frames, round(max_lat_ms / FRAME_MS))
+        self.sender = RtpSender(self.ssrc, prebuffer_frames=prebuffer_frames,
+                                max_outbuf_frames=max_outbuf_frames)
         self.latch = RtpLatch()
 
         # Estado de I/O (se rellena en start()).
@@ -437,6 +554,7 @@ class MediaBridge:
         # descarta el frame más viejo (drop-oldest) en vez de crecer sin tope.
         self._inbound_q: "asyncio.Queue[str]" = asyncio.Queue(maxsize=200)
         self._inbound_frames = 0
+        self._inbound_drops = 0   # frames inbound descartados (drop-oldest)
 
         self._closed = False
         self._tasks: set = set()
@@ -574,6 +692,7 @@ class MediaBridge:
             # más viejo a acumular latencia/memoria sin tope (drop-oldest).
             try:
                 self._inbound_q.get_nowait()
+                self._inbound_drops += 1
             except asyncio.QueueEmpty:
                 pass
             try:
@@ -641,22 +760,30 @@ class MediaBridge:
         """Emite 160 B de RTP cada 20 ms EXACTOS hacia la addr aprendida.
 
         Reloj monotónico anti-deriva: ``next_t += 0.020`` y dormimos hasta el
-        próximo tick (clamp a 0). Cada tick ``sender.next_packet()`` da un
-        paquete SOLO si hay ≥160 B bufferizados; si openclaw manda rápido el
-        outbuf se va vaciando a este ritmo (dripeo, no ráfaga).
+        próximo tick (clamp a 0). Cada tick ``sender.tick()`` aplica el jitter
+        buffer: ``None`` SOLO durante el prebuffer inicial (el stream aún no
+        arrancó) o antes de que el latch aprenda la addr; una vez en
+        ``draining`` SIEMPRE da un paquete (audio o comfort noise), así que el
+        RTP es CONTINUO a 20 ms y Asterisk no ve huecos. La guarda
+        ``if pkt and target ...`` deja pasar el prebuffer sin enviar.
         """
         loop = asyncio.get_running_loop()
         next_t = loop.time()
         try:
             while not self._closed:
-                pkt = self.sender.next_packet()
                 target = self.latch.target()
-                if pkt and target and self.udp_transport is not None:
-                    try:
-                        self.udp_transport.sendto(pkt, target)
-                    except Exception:  # noqa: BLE001  sendto puntual falla -> seguir
-                        log.debug("media channel=%s sendto falló", self.channel_id,
-                                  exc_info=True)
+                # No avanzar la FSM/seq/ts ni consumir audio hasta que el latch
+                # aprenda la addr de Asterisk: si no, los primeros frames (y el
+                # marker=1 del talkspurt) se consumirían y descartarían. Mientras
+                # tanto el audio se acumula en outbuf (feed) y arranca completo.
+                if target is not None and self.udp_transport is not None:
+                    pkt = self.sender.tick()
+                    if pkt:
+                        try:
+                            self.udp_transport.sendto(pkt, target)
+                        except Exception:  # noqa: BLE001  sendto puntual falla
+                            log.debug("media channel=%s sendto falló",
+                                      self.channel_id, exc_info=True)
                 next_t += PACER_INTERVAL
                 await asyncio.sleep(max(0.0, next_t - loop.time()))
         except asyncio.CancelledError:
@@ -727,5 +854,20 @@ class MediaBridge:
                 log.debug("close: DELETE bridge %s falló", self.bridge_id,
                           exc_info=True)
 
+        # Instrumentación por sesión: solo enteros agregados + booleano de
+        # latch. NUNCA loguea el ws_url/token, el signing_secret ni payloads de
+        # audio. Da DATOS para diagnosticar la calidad sin adivinar:
+        # underruns>0 -> subir AMI_VOICE_JITTER_MS; inbound_drops>0 -> el WS del
+        # cliente no consume a tiempo; latch=no -> Asterisk nunca envió RTP.
+        s = self.sender
+        log.info(
+            "media channel=%s stats: rtp_in=%d ws_out=%d underruns=%d "
+            "comfort=%d inbound_drops=%d outbuf_drops=%dB max_outbuf=%dB "
+            "latch=%s state=%s",
+            self.channel_id, self._inbound_frames, s.n_frames_emitted,
+            s.n_underruns, s.n_comfort_frames, self._inbound_drops,
+            s.n_outbuf_drops, s.max_outbuf_depth,
+            "yes" if self.latch.target() else "no", s.state,
+        )
         log.info("media channel=%s puente cerrado (stream_sid=%s)",
                  self.channel_id, self.stream_sid)

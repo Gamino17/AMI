@@ -6,9 +6,15 @@ SIN red: ni UDP, ni Asterisk/ARI, ni WebSocket real. Cubren:
   * RTP puro: ``build_rtp`` / ``parse_rtp`` round-trip, tolerancia a CSRC,
     extension header (X) y padding (P), descarte de versión != 2 y de paquetes
     cortos (< 12 bytes) sin lanzar.
-  * Pacer puro: ``RtpSender`` (marker bit del primer paquete de un talkspurt,
-    ``seq+1`` / ``ts+160`` por frame de 20 ms, cadencia y no ráfagas, wraparound
-    uint16/uint32, ``clear()`` que vacía el buffer y rearma el marker).
+  * Pacer puro (API histórica ``next_packet``): ``RtpSender`` (marker bit del
+    primer paquete de un talkspurt, ``seq+1`` / ``ts+160`` por frame de 20 ms,
+    cadencia y no ráfagas, wraparound uint16/uint32, ``clear()`` que vacía el
+    buffer y rearma el marker). Esta API NO consulta la FSM del jitter buffer.
+  * Jitter buffer (API nueva ``tick``): FSM ``buffering`` -> ``draining``
+    (prebuffer configurable), comfort noise (silencio μ-law 0xFF) en underrun,
+    seq/ts CONTINUOS a 20 ms (avanzan por tick, no solo cuando hay audio),
+    marker en el resume tras silencio, wraparound, y los contadores de
+    instrumentación (deterministas, reloj implícito = nº de llamadas a tick()).
   * Frames Media Streams (JSON EXACTO del contrato openclaw): ``encode_start`` /
     ``encode_media`` / ``encode_mark`` / ``encode_stop`` salientes y
     ``decode_client_frame`` entrante (media/clear/mark con ``streamSid`` raíz),
@@ -17,6 +23,9 @@ SIN red: ni UDP, ni Asterisk/ARI, ni WebSocket real. Cubren:
   * recv-loop con un WebSocket FAKE en memoria: ``MediaBridge._ws_recv_loop``
     consume frames media/clear/mark de un async-iterator y aplica
     ``feed()`` / ``clear()`` al ``RtpSender`` sin tocar red/ARI/UDP.
+  * Instrumentación por sesión: contador de drops de la cola inbound, log de
+    stats en ``close()`` (sin secreto/token/audio), pacer continuo vía tick(),
+    y wiring del prebuffer desde ``AMI_VOICE_JITTER_MS``.
 
 Ubicación y mecánica idéntica a tests/test_voice_bridge.py: vive en tests/
 porque pytest.ini tiene ``norecursedirs = ... infra``; añadimos el directorio
@@ -31,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import struct
 import sys
@@ -81,6 +91,14 @@ def _new_sender(ssrc: int = 0x11223344):
             continue
     # Última opción: que pete con la traza original de la firma real.
     return media.RtpSender(ssrc=ssrc)
+
+
+def _sender_prebuffer(prebuffer_frames: int, ssrc: int = 0x11223344):
+    """RtpSender con un prebuffer EXPLÍCITO (frames) para tests deterministas
+    del jitter buffer sin reloj real ni env. El prebuffer se inyecta por el
+    ctor: 1 frame = arranque inmediato al primer feed completo; N frames =
+    acumula N antes de pasar a 'draining'."""
+    return media.RtpSender(ssrc=ssrc, prebuffer_frames=prebuffer_frames)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -215,7 +233,11 @@ def test_parse_no_lanza_con_basura():
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  2. PACER PURO — RtpSender (cadencia 20 ms, marker, seq/ts, clear)
+#  2. PACER PURO — RtpSender.next_packet (cadencia 20 ms, marker, seq/ts, clear)
+#
+#  next_packet es la API histórica de BAJO NIVEL: "dame un frame de audio o
+#  None". NO participa de la FSM del jitter buffer; estos 7 tests garantizan
+#  que su semántica NO cambió al añadir tick().
 # ──────────────────────────────────────────────────────────────────────
 
 def test_pacer_marker_primer_paquete():
@@ -269,6 +291,7 @@ def test_pacer_clear_vacia_y_reinicia_marker():
     # feed(320) -> emite 1 frame; clear() descarta lo pendiente y rearma el
     # marker; tras clear el buffer está vacío (None) hasta volver a feed; el
     # siguiente paquete tras feed(160) vuelve a llevar marker=1 (nuevo talkspurt).
+    # next_packet NO consulta la FSM, así que sigue dando None en buffer vacío.
     s = _new_sender()
     s.feed(b"\x00" * 320)
     assert s.next_packet() is not None  # consume el 1er frame
@@ -306,6 +329,226 @@ def test_pacer_ssrc_constante_por_sesion():
     p1 = media.parse_rtp(s.next_packet())
     p2 = media.parse_rtp(s.next_packet())
     assert p1["ssrc"] == p2["ssrc"]
+
+
+def test_next_packet_intacto_no_usa_fsm():
+    # Regresión EXPLÍCITA: next_packet() ignora self.state. Aunque forcemos el
+    # sender a 'draining', con el buffer vacío next_packet sigue devolviendo
+    # None (no inventa silencio: ESO lo hace tick()). Garantiza que los tests
+    # históricos de next_packet no cambian de semántica al añadir el jitter buffer.
+    s = _new_sender()
+    s.state = "draining"          # forzamos el estado de drenaje
+    assert s.next_packet() is None, "next_packet en buffer vacío -> None (no FSM)"
+    # Con un frame completo emite audio real (no silencio), igual que siempre.
+    s.feed(b"\x33" * 160)
+    pkt = s.next_packet()
+    assert pkt is not None
+    assert media.parse_rtp(pkt)["payload"] == b"\x33" * 160
+    assert media.parse_rtp(pkt)["payload"] != media.SILENCE_FRAME
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  2b. JITTER BUFFER — RtpSender.tick (FSM buffering->draining, comfort noise)
+#
+#  tick() es la API que el pacer usa EN PRODUCCIÓN. Reloj implícito: 1 tick =
+#  20 ms = una llamada. Tests deterministas con prebuffer EXPLÍCITO por ctor.
+# ──────────────────────────────────────────────────────────────────────
+
+def test_tick_buffering_no_emite_hasta_prebuffer():
+    # prebuffer = 3 frames (~60 ms). Mientras outbuf < 3*160 el sender está en
+    # 'buffering' y tick() devuelve None (el stream RTP aún no ha arrancado:
+    # esto es prebuffer inicial, NO underrun). Al alcanzar el prebuffer pasa a
+    # 'draining' y emite el primer frame de audio.
+    s = _sender_prebuffer(3)
+    assert s.state == "buffering"
+
+    s.feed(b"\x01" * 160)
+    assert s.tick() is None, "1<3 frames: aún buffering"
+    assert s.state == "buffering"
+
+    s.feed(b"\x01" * 160)
+    assert s.tick() is None, "2<3 frames: aún buffering"
+    assert s.state == "buffering"
+
+    s.feed(b"\x01" * 160)  # ahora hay 3 frames acumulados
+    pkt = s.tick()
+    assert pkt is not None, "alcanzado el prebuffer: pasa a draining y emite"
+    assert s.state == "draining"
+    # Los ticks None del prebuffer NO cuentan como underrun.
+    assert s.n_underruns == 0
+    # El primer paquete emitido es AUDIO real, no silencio.
+    assert media.parse_rtp(pkt)["payload"] == b"\x01" * 160
+
+
+def test_tick_primer_paquete_marker_y_ts_continuo():
+    # Con el prebuffer alcanzado, el primer tick de audio lleva marker=1
+    # (talkspurt); los siguientes con buffer suficiente marker=0; seq +1 y ts
+    # +160 por tick. parse_rtp como oráculo.
+    s = _sender_prebuffer(1)  # arranque inmediato al primer frame completo
+    s.feed(b"\x07" * (160 * 3))  # 3 frames listos de golpe
+
+    pkts = [s.tick() for _ in range(3)]
+    assert all(p is not None for p in pkts)
+    a, b, c = (media.parse_rtp(p) for p in pkts)
+
+    assert a["marker"] == 1, "primer paquete del talkspurt -> marker=1"
+    assert b["marker"] == 0
+    assert c["marker"] == 0
+    assert b["seq"] == (a["seq"] + 1) & 0xFFFF
+    assert c["seq"] == (b["seq"] + 1) & 0xFFFF
+    assert b["ts"] == (a["ts"] + 160) & 0xFFFFFFFF
+    assert c["ts"] == (b["ts"] + 160) & 0xFFFFFFFF
+    # 3 frames de audio real emitidos, cero silencio.
+    assert s.n_frames_emitted == 3
+    assert s.n_comfort_frames == 0
+
+
+def test_tick_underrun_inyecta_silencio_continuo():
+    # prebuffer = 1. Tras emitir 1 frame de audio, sin feed el siguiente tick
+    # NO devuelve None (como haría next_packet) sino un paquete de COMFORT NOISE
+    # (silencio μ-law 0xFF*160, marker=0) para mantener el flujo RTP continuo.
+    s = _sender_prebuffer(1)
+    s.feed(b"\x09" * 160)
+
+    audio = s.tick()
+    assert audio is not None
+    assert media.parse_rtp(audio)["marker"] == 1  # primer audio del talkspurt
+
+    silence = s.tick()  # underrun: no hay más audio bufferizado
+    assert silence is not None, "en draining tick() NUNCA es None: inyecta silencio"
+    parsed = media.parse_rtp(silence)
+    assert parsed["payload"] == media.SILENCE_FRAME, "comfort noise = 0xFF*160"
+    assert parsed["payload"] == bytes([media.ULAW_SILENCE_BYTE]) * 160
+    assert parsed["marker"] == 0, "el silencio no abre talkspurt"
+    assert s.n_underruns == 1
+    assert s.n_comfort_frames == 1
+    assert s.n_frames_emitted == 1  # solo 1 frame de AUDIO real
+
+
+def test_tick_ts_seq_continuos_en_underrun():
+    # CLAVE del fix: 1 frame audio + 3 ticks de underrun + 1 frame audio
+    # (re-feed). Los 5 paquetes tienen seq consecutivos (+1 cada uno) y ts +160
+    # monótono SIN saltos ni rezago -> el RTP es continuo y el ts avanza por
+    # tiempo real (no solo cuando hay audio), que es lo que Asterisk espera.
+    s = _sender_prebuffer(1)
+    s.feed(b"\x10" * 160)
+
+    pkts = [s.tick()]              # audio #1
+    pkts += [s.tick() for _ in range(3)]  # 3 underruns -> silencio
+    s.feed(b"\x11" * 160)
+    pkts += [s.tick()]            # audio #2 (resume)
+
+    assert all(p is not None for p in pkts), "draining: ningún tick es None"
+    parsed = [media.parse_rtp(p) for p in pkts]
+
+    # seq consecutivos +1 sin huecos.
+    for i in range(1, len(parsed)):
+        assert parsed[i]["seq"] == (parsed[i - 1]["seq"] + 1) & 0xFFFF, (
+            f"seq no consecutivo en {i}")
+        # ts monótono +160 por tick (wall-clock), incluido durante el silencio.
+        assert parsed[i]["ts"] == (parsed[i - 1]["ts"] + 160) & 0xFFFFFFFF, (
+            f"ts no continuo en {i}")
+
+    # Los 3 huecos se rellenaron con silencio; 2 frames de audio real.
+    assert s.n_underruns == 3
+    assert s.n_comfort_frames == 3
+    assert s.n_frames_emitted == 2
+
+
+def test_tick_marker_resume_tras_silencio():
+    # audio -> silencio(s) -> nuevo feed: el primer paquete de audio tras el
+    # silencio lleva marker=1 (resume talkspurt, RFC 3550) y _in_silence vuelve
+    # a False. Es la señal que evita que Asterisk malinterprete el salto.
+    s = _sender_prebuffer(1)
+    s.feed(b"\x20" * 160)
+
+    a = media.parse_rtp(s.tick())          # audio #1, marker=1
+    assert a["marker"] == 1
+
+    sil1 = media.parse_rtp(s.tick())       # underrun
+    sil2 = media.parse_rtp(s.tick())       # underrun
+    assert sil1["marker"] == 0 and sil2["marker"] == 0
+    assert s._in_silence is True
+
+    s.feed(b"\x21" * 160)
+    resume = media.parse_rtp(s.tick())     # audio tras silencio
+    assert resume["marker"] == 1, "resume de talkspurt tras silencio -> marker=1"
+    assert resume["payload"] == b"\x21" * 160
+    assert s._in_silence is False
+    # Tras el resume, si sigue habiendo audio el marker vuelve a 0.
+    s.feed(b"\x22" * 160)
+    cont = media.parse_rtp(s.tick())
+    assert cont["marker"] == 0
+
+
+def test_tick_clear_vuelve_a_buffering():
+    # En draining, clear() (barge-in) resetea la FSM a 'buffering': el siguiente
+    # tick es None hasta re-acumular el prebuffer, y el primer audio tras
+    # re-prebuffer vuelve a llevar marker=1. Verifica que el barge-in
+    # re-prebufferiza el nuevo talkspurt del agente.
+    s = _sender_prebuffer(2)
+    s.feed(b"\x30" * (160 * 2))
+    assert s.tick() is not None
+    assert s.state == "draining"
+
+    s.clear()
+    assert s.state == "buffering", "clear() vuelve a buffering (re-prebuffer)"
+    assert s.tick() is None, "tras clear, buffering hasta re-acumular el prebuffer"
+
+    s.feed(b"\x31" * 160)
+    assert s.tick() is None, "1<2 frames: aún buffering"
+    s.feed(b"\x31" * 160)
+    pkt = s.tick()
+    assert pkt is not None
+    assert s.state == "draining"
+    assert media.parse_rtp(pkt)["marker"] == 1, (
+        "primer audio tras re-prebuffer reinicia talkspurt (marker=1)")
+
+
+def test_tick_seq_ts_wraparound():
+    # Como test_pacer_ts_seq_wraparound pero vía tick(): seq=0xFFFF y
+    # ts=0xFFFFFFFF en el límite -> wrap correcto a 0 / 159 al emitir, INCLUIDO
+    # cuando el segundo paquete es un frame de silencio (underrun).
+    s = _sender_prebuffer(1)
+    s.seq = 0xFFFF
+    s.ts = 0xFFFFFFFF
+    s.feed(b"\x40" * 160)
+
+    p1 = media.parse_rtp(s.tick())   # audio en el límite
+    p2 = media.parse_rtp(s.tick())   # underrun -> silencio, debe wrap igual
+    assert p1["seq"] == 0xFFFF
+    assert p1["ts"] == 0xFFFFFFFF
+    assert p2["seq"] == 0x0000, "wrap uint16 también en el frame de silencio"
+    assert p2["ts"] == 159, "wrap uint32 también en el frame de silencio"
+    assert p2["payload"] == media.SILENCE_FRAME
+
+
+def test_tick_contadores_instrumentacion():
+    # Secuencia conocida de feeds/ticks -> contadores EXACTOS y deterministas:
+    #   - prebuffer = 2 frames.
+    #   - feed 3 frames de golpe; max_outbuf_depth debe registrar 3*160.
+    #   - tick #1: alcanza prebuffer -> draining + emite audio (1 transición).
+    #   - ticks #2,#3: audio (quedan 2 frames tras el #1).
+    #   - tick #4: underrun -> silencio.
+    #   - clear(): vuelve a buffering (2ª transición).
+    s = _sender_prebuffer(2)
+    s.feed(b"\x50" * (160 * 3))
+    assert s.max_outbuf_depth == 160 * 3
+
+    assert s.tick() is not None   # #1 audio (prebuffer alcanzado)
+    assert s.tick() is not None   # #2 audio
+    assert s.tick() is not None   # #3 audio
+    assert s.tick() is not None   # #4 underrun -> silencio
+
+    assert s.n_frames_emitted == 3
+    assert s.n_underruns == 1
+    assert s.n_comfort_frames == 1
+    assert s.n_state_transitions == 1  # buffering -> draining
+
+    s.clear()
+    assert s.n_state_transitions == 2  # draining -> buffering (barge-in)
+    # max_outbuf_depth no decrece (es un máximo histórico para diagnóstico).
+    assert s.max_outbuf_depth == 160 * 3
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -559,8 +802,228 @@ def test_close_idempotente_sin_io():
     asyncio.run(_run())
 
 
+def test_close_loguea_stats_sin_secreto(caplog):
+    # close() emite UNA línea log.info con los contadores por sesión (rtp_in /
+    # ws_out / underruns / comfort / inbound_drops / max_outbuf / latch / state)
+    # y NUNCA el ws_url/token ni payloads. Da DATOS sin exponer secretos.
+    async def _run():
+        mb = _make_bridge_no_io()
+        # Simulamos un poco de actividad para que los contadores sean != 0.
+        mb._inbound_frames = 5
+        mb._inbound_drops = 2
+        mb.sender.feed(b"\x55" * 160)
+        mb.sender.prebuffer_bytes = 160  # arranque inmediato
+        mb.sender.tick()                 # 1 frame de audio
+        mb.sender.tick()                 # 1 underrun -> comfort noise
+        await mb.close()
+        return mb
+
+    with caplog.at_level(logging.INFO, logger="ami_voice_bridge.media"):
+        mb = asyncio.run(_run())
+
+    stats_lines = [r.getMessage() for r in caplog.records if "stats:" in r.getMessage()]
+    assert stats_lines, "close() debe emitir una línea de stats por sesión"
+    line = stats_lines[0]
+    # Substrings clave presentes (instrumentación medible).
+    for token in ("rtp_in=", "ws_out=", "underruns=", "comfort=",
+                  "inbound_drops=", "max_outbuf=", "latch=", "state="):
+        assert token in line, f"falta {token!r} en la línea de stats"
+    # Contadores reflejan la actividad simulada.
+    assert "rtp_in=5" in line
+    assert "inbound_drops=2" in line
+    assert "ws_out=1" in line
+    assert "underruns=1" in line
+    # SEGURIDAD: ni el token del ws_url ni el b64 del audio aparecen en NINGÚN log.
+    all_logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "tok123" not in all_logs, "el token del ws_url NO debe loguearse"
+    assert base64.b64encode(b"\x55" * 160).decode("ascii") not in all_logs, (
+        "el payload de audio NO debe loguearse")
+
+
 # ──────────────────────────────────────────────────────────────────────
-#  7. MediaBridge.start() — orquestación ARI + bind UDP efímero (I/O mockeada)
+#  7. Instrumentación path ENTRANTE — drop-oldest de la cola inbound
+# ──────────────────────────────────────────────────────────────────────
+
+def test_inbound_drops_contador():
+    # _on_rtp_in encola hacia el WS; si la cola (maxsize=200) está llena dropea
+    # el frame MÁS VIEJO (drop-oldest) e incrementa _inbound_drops. Llenamos la
+    # cola y verificamos que cada datagrama extra cuenta como un drop, sin que
+    # crezca por encima del maxsize (sin latencia/memoria sin tope).
+    async def _run():
+        mb = _make_bridge_no_io()
+        maxsize = mb._inbound_q.maxsize
+        # Llenar la cola exacta hasta el tope con datagramas válidos.
+        for _ in range(maxsize):
+            mb._on_rtp_in(b"\x66" * 160)
+        assert mb._inbound_q.full()
+        assert mb._inbound_drops == 0, "aún no se ha dropeado nada"
+
+        # Cada datagrama extra fuerza un drop-oldest.
+        for _ in range(5):
+            mb._on_rtp_in(b"\x66" * 160)
+
+        assert mb._inbound_drops == 5
+        assert mb._inbound_q.qsize() == maxsize, (
+            "la cola NO crece por encima del maxsize (drop-oldest)")
+        return mb
+
+    asyncio.run(_run())
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  8. Pacer continuo — _pacer_loop emite un sendto por tick (incl. silencio)
+# ──────────────────────────────────────────────────────────────────────
+
+class _FakeUDP:
+    """Transport UDP falso: graba cada sendto(pkt, addr) sin tocar red."""
+
+    def __init__(self):
+        self.sent: list = []
+
+    def sendto(self, data, addr):
+        self.sent.append((data, addr))
+
+
+def test_pacer_loop_emite_continuo():
+    # Con el latch ya aprendido y un transport UDP falso, el _pacer_loop debe
+    # producir un sendto por tick UNA VEZ en 'draining' — incluido el frame de
+    # silencio en underrun (continuidad RTP). Forzamos PACER_INTERVAL a ~0 para
+    # que el loop avance rápido y lo cancelamos tras recoger varios paquetes.
+    async def _run(monkeypatch_interval):
+        mb = _make_bridge_no_io()
+        # Prebuffer mínimo: arranca al primer frame; un solo frame de audio y el
+        # resto serán comfort noise (underrun) -> el pacer DEBE seguir enviando.
+        mb.sender.prebuffer_bytes = 160
+        mb.sender.feed(b"\x77" * 160)
+        mb.latch.learn(("1.2.3.4", 5000))  # target conocido
+        udp = _FakeUDP()
+        mb.udp_transport = udp
+
+        # Acelerar el reloj del pacer: sin esto el test tardaría 20 ms/tick.
+        media.PACER_INTERVAL = 0.0
+
+        task = asyncio.create_task(mb._pacer_loop())
+        # Ceder control varias veces para que el loop ejecute >=5 ticks.
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if len(udp.sent) >= 5:
+                break
+        mb._closed = True
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return udp, mb
+
+    saved_interval = media.PACER_INTERVAL
+    try:
+        udp, mb = asyncio.run(_run(None))
+    finally:
+        media.PACER_INTERVAL = saved_interval
+
+    assert len(udp.sent) >= 5, "el pacer debe emitir un paquete por tick en draining"
+    # El primer paquete es audio real; los siguientes son silencio (underrun)
+    # pero TODOS se envían (RTP continuo, no huecos).
+    first = media.parse_rtp(udp.sent[0][0])
+    assert first["payload"] == b"\x77" * 160
+    later = media.parse_rtp(udp.sent[1][0])
+    assert later["payload"] == media.SILENCE_FRAME
+    # seq consecutivos en lo enviado (sin huecos de secuencia).
+    seqs = [media.parse_rtp(pkt)["seq"] for pkt, _addr in udp.sent]
+    for i in range(1, len(seqs)):
+        assert seqs[i] == (seqs[i - 1] + 1) & 0xFFFF
+    # Hubo al menos un underrun absorbido por comfort noise.
+    assert mb.sender.n_underruns >= 1
+
+
+def test_pacer_loop_no_emite_sin_latch():
+    # Sin addr aprendida (latch.target() is None) el pacer NO debe enviar nada,
+    # aunque el sender tenga audio listo: el RTP solo sale cuando sabemos a
+    # dónde devolverlo. Verifica la guarda del sendto.
+    async def _run():
+        mb = _make_bridge_no_io()
+        mb.sender.prebuffer_bytes = 160
+        mb.sender.feed(b"\x88" * 320)
+        udp = _FakeUDP()
+        mb.udp_transport = udp
+        # NO llamamos latch.learn -> target() is None.
+
+        media.PACER_INTERVAL = 0.0
+        task = asyncio.create_task(mb._pacer_loop())
+        for _ in range(30):
+            await asyncio.sleep(0)
+        mb._closed = True
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return udp
+
+    saved_interval = media.PACER_INTERVAL
+    try:
+        udp = asyncio.run(_run())
+    finally:
+        media.PACER_INTERVAL = saved_interval
+
+    assert udp.sent == [], "sin latch aprendido el pacer no envía RTP"
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  9. Wiring de la config del jitter — AMI_VOICE_JITTER_MS -> prebuffer_frames
+# ──────────────────────────────────────────────────────────────────────
+
+def test_prebuffer_configurable_env(monkeypatch):
+    # MediaBridge deriva el prebuffer del sender de AMI_VOICE_JITTER_MS:
+    # prebuffer_frames = round(jitter_ms / FRAME_MS) (FRAME_MS=20). 40 -> 2,
+    # 60 -> 3, 100 -> 5. prebuffer_bytes = frames * 160.
+    def _bridge_with_jitter(ms):
+        monkeypatch.setenv("AMI_VOICE_JITTER_MS", str(ms))
+        return media.MediaBridge(
+            channel_id="ch", sip_channel_id="ch",
+            ws_url="wss://agent.example/voice/stream/tok",
+            call_sid="call_x", params={},
+        )
+
+    mb40 = _bridge_with_jitter(40)
+    assert mb40.sender.prebuffer_bytes == 2 * media.FRAME_BYTES
+
+    mb60 = _bridge_with_jitter(60)
+    assert mb60.sender.prebuffer_bytes == 3 * media.FRAME_BYTES
+
+    mb100 = _bridge_with_jitter(100)
+    assert mb100.sender.prebuffer_bytes == 5 * media.FRAME_BYTES
+
+
+def test_prebuffer_default_y_minimo(monkeypatch):
+    # Sin la env -> default DEFAULT_JITTER_MS (60 ms -> 3 frames). Un valor
+    # absurdo/0 -> mínimo de 1 frame (nunca prebuffer 0, que rompería el
+    # arranque del stream). Un valor no numérico -> cae al default sin lanzar.
+    monkeypatch.delenv("AMI_VOICE_JITTER_MS", raising=False)
+    mb_def = media.MediaBridge(
+        channel_id="ch", sip_channel_id="ch",
+        ws_url="wss://agent.example/voice/stream/tok", call_sid="call_x", params={})
+    expected = max(1, round(media.DEFAULT_JITTER_MS / media.FRAME_MS))
+    assert mb_def.sender.prebuffer_bytes == expected * media.FRAME_BYTES
+
+    monkeypatch.setenv("AMI_VOICE_JITTER_MS", "0")
+    mb0 = media.MediaBridge(
+        channel_id="ch", sip_channel_id="ch",
+        ws_url="wss://agent.example/voice/stream/tok", call_sid="call_x", params={})
+    assert mb0.sender.prebuffer_bytes == 1 * media.FRAME_BYTES, (
+        "jitter 0 -> mínimo 1 frame de prebuffer")
+
+    monkeypatch.setenv("AMI_VOICE_JITTER_MS", "no-es-un-numero")
+    mb_bad = media.MediaBridge(
+        channel_id="ch", sip_channel_id="ch",
+        ws_url="wss://agent.example/voice/stream/tok", call_sid="call_x", params={})
+    assert mb_bad.sender.prebuffer_bytes == expected * media.FRAME_BYTES, (
+        "env no numérica -> default sin lanzar")
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  10. MediaBridge.start() — orquestación ARI + bind UDP efímero (I/O mockeada)
 # ──────────────────────────────────────────────────────────────────────
 
 class _BlockingWS:
@@ -666,3 +1129,24 @@ def test_start_orquesta_externalmedia_bridge_y_ws(monkeypatch):
     assert snap["ws_url"] == "wss://agent.example/voice/stream/realtime/tok"
 
     asyncio.run(_run())
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  8. Tope del outbuf (drop-oldest) — el jitter buffer no crece sin límite
+# ──────────────────────────────────────────────────────────────────────
+
+def test_outbuf_bounded_drop_oldest():
+    # Si el cliente entrega audio MÁS RÁPIDO que tiempo real, el outbuf se acota
+    # descartando el audio MÁS VIEJO (drop-oldest), contando los bytes dropeados.
+    s = media.RtpSender(ssrc=0x1, prebuffer_frames=1, max_outbuf_frames=3)
+    cap = s.max_outbuf_bytes
+    assert cap == 3 * media.FRAME_BYTES
+    # Alimentar 10 frames de golpe (muy por encima del techo de 3).
+    s.feed(bytes([0x10]) * (10 * media.FRAME_BYTES))
+    assert len(s.outbuf) <= cap, "el outbuf debe quedar acotado al techo"
+    assert s.n_outbuf_drops > 0, "debe contar los bytes viejos descartados"
+    # Drop-OLDEST: lo que queda es el audio más NUEVO (último frame == 0x10*160).
+    assert bytes(s.outbuf[-media.FRAME_BYTES:]) == bytes([0x10]) * media.FRAME_BYTES
+    # El techo nunca baja del prebuffer.
+    s2 = media.RtpSender(ssrc=0x2, prebuffer_frames=5, max_outbuf_frames=1)
+    assert s2.max_outbuf_bytes >= s2.prebuffer_bytes
