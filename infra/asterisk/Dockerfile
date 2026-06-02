@@ -43,10 +43,14 @@ COPY --chmod=0755 <<'EOF' /usr/local/bin/start-asterisk.sh
 set -e
 
 # Render: copia los templates de /etc/asterisk-templates/ a /etc/asterisk/,
-# expandiendo placeholders ${VAR} con envsubst. Los templates están RO
-# (bind-mounted desde el host); /etc/asterisk/ es RW dentro del container.
+# expandiendo placeholders ${VAR} con envsubst SOLO sobre las env vars que
+# nosotros pasamos al container. CRÍTICO: si dejamos envsubst expandir todo,
+# se carga las variables del dialplan Asterisk (${EXTEN}, ${CALLERID(num)},
+# ${SIP_HEADER(...)}, ${AMI_API}, ${TELCO_KEY}, etc.) que NO son env vars
+# sino runtime vars del dialplan. Por eso usamos la whitelist explícita.
 TEMPLATES_DIR=/etc/asterisk-templates
 TARGET_DIR=/etc/asterisk
+ENVSUBST_VARS='${EXTERNAL_IP} ${AMI_PUBLIC_URL} ${AMI_TELCO_INBOUND_KEY} ${SIP_TRUNK_HOST} ${SIP_TRUNK_PORT} ${SIP_TRUNK_USERNAME} ${SIP_TRUNK_PASSWORD} ${ARI_USERNAME} ${ARI_PASSWORD}'
 
 if [ -d "$TEMPLATES_DIR" ]; then
   for src in "$TEMPLATES_DIR"/*.conf; do
@@ -54,7 +58,7 @@ if [ -d "$TEMPLATES_DIR" ]; then
     name="$(basename "$src")"
     dst="$TARGET_DIR/$name"
     if grep -q '\${' "$src" 2>/dev/null; then
-      envsubst < "$src" > "$dst"
+      envsubst "$ENVSUBST_VARS" < "$src" > "$dst"
     else
       cp "$src" "$dst"
     fi
