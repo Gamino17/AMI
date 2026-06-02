@@ -74,6 +74,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import ami_voice_streams as vs  # noqa: E402  (import tras ajustar sys.path)
+import media  # noqa: E402  (capa de audio Paso 3; vive junto a bridge.py)
 
 
 log = logging.getLogger("ami_voice_bridge")
@@ -98,6 +99,11 @@ class Config:
             os.environ.get("AMI_VOICE_BRIDGE_HEALTH_PORT", "8090")
         )
         self.log_level: str = os.environ.get("AMI_VOICE_LOG_LEVEL", "INFO")
+        # Host (DNS interno de ami_net) que Asterisk usa como external_host del
+        # canal externalMedia para enviarnos el RTP. El puerto UDP es EFÍMERO
+        # por sesión (lo elige media.MediaBridge al bindear), así que no se
+        # configura puerto fijo.
+        self.rtp_host: str = os.environ.get("AMI_VOICE_BRIDGE_RTP_HOST", "ami_voice_bridge")
 
 
 # Config global del proceso (se inicializa en main(); los tests la setean
@@ -356,47 +362,45 @@ async def run_actions(channel_id: str, actions: "list[dict]",
 
 async def start_media_bridge(channel_id: str, ws_url: str,
                              params: dict, session: dict) -> None:
-    """HOOK Paso 3 — capa de AUDIO. En Paso 2 SOLO registra la intención.
+    """HOOK Paso 3 — abre la capa de AUDIO (RTP <-> WebSocket Media Streams).
 
-    En Paso 2 esta función no abre ni RTP ni el WebSocket Media Streams: solo
-    guarda la intención en la sesión y loguea. El channel queda en Stasis
-    hasta que cuelguen — aceptable porque sin audio la llamada no progresa;
-    esto es un PoC de signaling.
+    Construye un media.MediaBridge para la sesión y lo arranca: bind UDP +
+    externalMedia + bridge mixing + handshake WS. mb.start() lanza las tasks de
+    fondo (recv/send/pacer) y RETORNA, así que no bloquea handle_event. El
+    callSid del 'start' DEBE ser el AMI_CALL_ID (session['call_id']); sin él NO
+    abrimos audio (colgamos). mb queda en session['media']['bridge'] para el
+    teardown en _on_channel_gone.
     """
-    session["media"] = {"ws_url": ws_url, "params": params, "stream_sid": None}
+    call_sid = session.get("call_id")
+    if not call_sid:
+        log.error(
+            "start_media_bridge channel=%s sin AMI_CALL_ID -> hangup "
+            "(no abrimos audio sin callSid válido)", channel_id,
+        )
+        await ari_hangup(channel_id)
+        return
     log.info(
-        "start_media_bridge HOOK (TODO Paso 3): channel=%s call_sid=%s ws=%s "
-        "params=%s",
-        channel_id, session.get("call_id"), ws_url, params,
+        "start_media_bridge channel=%s call_sid=%s ws=%s",
+        channel_id, call_sid, ws_url,
     )
-    # TODO Paso 3 (contrato openclaw, NO implementar aquí):
-    #   1. ARI POST /channels/externalMedia  (NO es sub-recurso del channel;
-    #        crea un canal UnicastRTP nuevo). Params en QUERY STRING:
-    #          ?app=ami_voice&external_host=<bridge_rtp_ip:port>&format=ulaw
-    #          &transport=udp&encapsulation=rtp
-    #        Devuelve el id del UnicastRTP channel μ-law 8 kHz. El body JSON se
-    #        reserva para 'variables'.
-    #   2. Crear un bridge ARI mixing (POST /bridges) y añadirle el SIP channel
-    #        + el externalMedia channel (POST /bridges/{id}/addChannel).
-    #   3. Abrir cliente WS hacia ws_url (wss del cliente openclaw). Handshake
-    #        Media Streams Twilio 1:1:
-    #          AMI->cliente: {'event':'start','start':{
-    #              'streamSid':<id de sesión>,
-    #              'callSid':<AMI_CALL_ID = call_xxx, ÚNICO por llamada>}}
-    #   4. Loop bidireccional μ-law base64:
-    #        RTP(asterisk) -> b64 ->
-    #          {'event':'media','media':{'payload':<b64>,'timestamp':..,
-    #           'track':'inbound'}} -> cliente
-    #        cliente ->
-    #          {'event':'media','streamSid':..,'media':{'payload':<b64>}}
-    #          -> decode -> RTP a externalMedia
-    #        soportar {'event':'mark'} y {'event':'clear'} entrantes del cliente;
-    #        emitir {'event':'mark'} y {'event':'stop'} al cerrar.
-    #   5. PACER de salida: 160 bytes (20 ms) de μ-law por frame; ritmo 20 ms
-    #        (no ráfagas).
-    #   El callSid del 'start' DEBE ser el AMI_CALL_ID (call_xxx) leído del
-    #   channel; streamSid puede ser cualquier id nuevo de sesión.
-    #   Toda esta lógica RTP<->WS NO se escribe en Paso 2.
+    mb = media.MediaBridge(
+        channel_id=channel_id, sip_channel_id=channel_id,
+        ws_url=ws_url, call_sid=call_sid, params=params,
+    )
+    session["media"] = {
+        "ws_url": ws_url, "params": params,
+        "stream_sid": mb.stream_sid, "bridge": mb,
+    }
+    try:
+        await mb.start()
+    except Exception:  # noqa: BLE001  fallo abriendo audio -> teardown + hangup
+        log.exception(
+            "start_media_bridge channel=%s falló abriendo audio -> hangup",
+            channel_id,
+        )
+        await mb.close()
+        await ari_hangup(channel_id)
+        return
 
 
 # ===================== MANEJO DE EVENTOS ARI =====================
@@ -420,6 +424,16 @@ async def _on_stasis_start(ev: dict) -> None:
     cid = ch.get("id")
     if not cid:
         log.warning("StasisStart sin channel.id: %s", ev)
+        return
+
+    # El canal externalMedia (UnicastRTP) que crea media.MediaBridge entra
+    # TAMBIÉN en Stasis (se crea con app=ami_voice). NO es una llamada entrante:
+    # lo gestiona su propio MediaBridge. Si lo tratáramos como entrante, no
+    # hallaríamos CALLBACK_VOICE_URL y haríamos ari_continue, matando el audio
+    # recién creado. Lo ignoramos por el nombre de canal.
+    if (ch.get("name") or "").startswith("UnicastRTP"):
+        log.debug("StasisStart de canal externalMedia %s ignorado "
+                  "(lo gestiona MediaBridge)", cid)
         return
 
     # Variables seteadas por el dialplan en la rama Stasis (ver ami_changes).
@@ -468,9 +482,20 @@ def _on_channel_gone(ev: dict) -> None:
     if sess is None:
         return
     if sess.get("media"):
-        # TODO Paso 3: cerrar el WebSocket Media Streams y el RTP/externalMedia
-        # asociados a esta sesión antes de descartarla.
-        log.info("cleanup channel=%s (tenía media activa, TODO Paso 3)", cid)
+        mb = sess["media"].get("bridge") if isinstance(sess["media"], dict) else None
+        if mb is not None:
+            # Cerrar el puente de audio (WS + UDP + externalMedia + bridge ARI).
+            # close() es idempotente/reentrante. _on_channel_gone es sync, así
+            # que lo programamos como task en el loop activo.
+            try:
+                asyncio.get_running_loop().create_task(mb.close())
+            except RuntimeError:
+                # Sin loop corriendo (test sync): cerrar best-effort.
+                asyncio.run(mb.close())
+            log.info("cleanup channel=%s -> cerrando media bridge (stream_sid=%s)",
+                     cid, sess["media"].get("stream_sid"))
+        else:
+            log.info("cleanup channel=%s (media sin bridge activo)", cid)
     else:
         log.info("cleanup channel=%s", cid)
 

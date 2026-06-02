@@ -522,3 +522,84 @@ def test_health_endpoint_404_otra_ruta():
         srv.shutdown()
         srv.server_close()
         t.join(timeout=2)
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  10. Paso 3 (audio): guard externalMedia + cableado start_media_bridge
+# ──────────────────────────────────────────────────────────────────────
+
+def test_stasis_start_ignora_canal_externalmedia(monkeypatch, ari_stubs):
+    # El canal UnicastRTP del externalMedia (que crea MediaBridge) entra en
+    # Stasis con app=ami_voice. _on_stasis_start DEBE ignorarlo por nombre: NI
+    # lee variables NI hace continue (un continue mataría el audio recién
+    # creado y competiría con el addChannel).
+    get_var = _AsyncRecorder(return_value=None)
+    monkeypatch.setattr(bridge, "ari_get_var", get_var, raising=True)
+
+    ev = {
+        "type": "StasisStart",
+        "application": "ami_voice",
+        "channel": {"id": "em_1", "name": "UnicastRTP/127.0.0.1:40000-0x1a2b"},
+    }
+    asyncio.run(bridge.handle_event(ev))
+
+    assert get_var.count == 0, "no debe leer variables del canal externalMedia"
+    assert ari_stubs["continue"].count == 0, "NO debe continue (mataría el audio)"
+    assert ari_stubs["hangup"].count == 0
+    assert "em_1" not in bridge.SESSIONS
+
+
+def test_start_media_bridge_sin_callsid_cuelga(monkeypatch, ari_stubs):
+    # Sin AMI_CALL_ID en la sesión no abrimos audio (callSid es invariante del
+    # contrato): colgamos y NO instanciamos MediaBridge.
+    import media
+    created = []
+    monkeypatch.setattr(media, "MediaBridge",
+                        lambda **kw: created.append(kw), raising=True)
+    sess = {"call_id": None, "media": None}
+    asyncio.run(bridge.start_media_bridge(
+        "ch_nc", "wss://x/stream/tok", {}, sess))
+    assert ari_stubs["hangup"].count == 1
+    assert ari_stubs["hangup"].channels == ["ch_nc"]
+    assert created == [], "no debe crear MediaBridge sin callSid"
+
+
+def test_start_media_bridge_crea_y_arranca(monkeypatch, ari_stubs):
+    # Con AMI_CALL_ID: crea MediaBridge(call_sid=call_id), llama start() y deja
+    # la instancia en session['media']['bridge'] para el teardown.
+    import media
+
+    class _FakeMB:
+        def __init__(self, **kw):
+            self.kw = kw
+            self.stream_sid = "stream_fake"
+            self.started = False
+
+        async def start(self):
+            self.started = True
+
+        async def close(self):
+            pass
+
+    instances = []
+
+    def _factory(**kw):
+        mb = _FakeMB(**kw)
+        instances.append(mb)
+        return mb
+
+    monkeypatch.setattr(media, "MediaBridge", _factory, raising=True)
+
+    sess = _session(channel_id="ch_a", call_id="call_real_1")
+    url = "wss://agent.example.com/voice/stream/realtime/tok"
+    asyncio.run(bridge.start_media_bridge("ch_a", url, {"k": "v"}, sess))
+
+    assert len(instances) == 1
+    mb = instances[0]
+    assert mb.kw["call_sid"] == "call_real_1"     # callSid == AMI_CALL_ID
+    assert mb.kw["sip_channel_id"] == "ch_a"
+    assert mb.kw["ws_url"] == url
+    assert mb.started is True
+    assert sess["media"]["bridge"] is mb
+    assert sess["media"]["stream_sid"] == "stream_fake"
+    assert ari_stubs["hangup"].count == 0          # cede el canal al puente

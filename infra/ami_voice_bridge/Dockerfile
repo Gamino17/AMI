@@ -26,6 +26,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ami_api, así que ami_voice_streams.py se copia desde la raíz y queda junto a
 # bridge.py para el import directo. NO se reimplementa: el bridge lo importa.
 COPY infra/ami_voice_bridge/bridge.py ./bridge.py
+COPY infra/ami_voice_bridge/media.py ./media.py
 COPY ami_voice_streams.py ./ami_voice_streams.py
 
 # Puerto del servidor /health para el healthcheck de Docker.
