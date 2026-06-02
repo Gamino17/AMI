@@ -138,10 +138,6 @@ def accept_call(call_id: str, api_key: str | None = None,
         "instructions": instructions or os.environ.get(
             "OPENAI_REALTIME_INSTRUCTIONS", DEFAULT_INSTRUCTIONS),
     }
-    # Voice se manda en el bloque audio.output si el modelo lo soporta.
-    v = voice or os.environ.get("OPENAI_REALTIME_VOICE", DEFAULT_VOICE)
-    if v:
-        body["audio"] = {"output": {"voice": v}}
 
     url = f"https://api.openai.com/v1/realtime/calls/{call_id}/accept"
     data = json.dumps(body).encode("utf-8")
