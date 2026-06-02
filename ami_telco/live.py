@@ -142,30 +142,52 @@ class LiveTelcoAdapter(TelcoAdapter):
 
     # ===================== Voz =====================
     def place_call(self, call: dict[str, Any]) -> None:
-        """Origina la llamada vía ARI. Asterisk marca al PSTN por el trunk y
-        cuando responde la bridgea por SIP al callback_sip_uri del cliente.
+        """Origina una llamada saliente via ARI.
 
-        El dialplan / Stasis application se encarga del bridge SIP↔SIP y de
-        notificar transiciones a /v1/_telco/calls/{id}/status."""
+        Estrategia sin Stasis app: originamos el channel hacia el
+        callback_sip_uri del agente AI (donde quiere recibir el audio).
+        Cuando el agente descuelga, el channel entra al dialplan en
+        [from_internal] bridge_outbound — desde ahí Asterisk hace Dial
+        al destino PSTN via trunk_partner, y bridge-bridge automático.
+
+        Las transiciones de estado (ringing/in_progress/completed) las
+        dispara el dialplan vía webhook /v1/_telco/calls/{id}/status.
+        """
         import ami_api
-        if not self.ari_url or not self.ari_trunk:
+        if not self.ari_url:
             self._fail_call(call["id"], "ari_not_configured")
             return
+        callback = call.get("callback_sip_uri") or ""
+        if not callback:
+            self._fail_call(call["id"], "missing_callback_sip_uri")
+            return
 
-        # Lanzamos la llamada al PSTN vía PJSIP/trunk_partner/sip:+34...@...
-        endpoint = f"{self.ari_trunk}/sip:{call['to'].lstrip('+')}@pstn"
+        # Detecta el caso OpenAI Realtime para usar el endpoint estático
+        # `openai_realtime` (Asterisk PJSIP no parsea bien URIs con
+        # ;transport=tls en el formato URI/endpoint).
+        if "sip.api.openai.com" in callback:
+            # Extrae el project_id del URI sip:proj_xxx@sip.api.openai.com;...
+            user = callback.split("sip:", 1)[-1].split("@", 1)[0]
+            endpoint = f"PJSIP/{user}@openai_realtime"
+        else:
+            # URI SIP genérico vía el endpoint template client_outbound.
+            endpoint = f"PJSIP/{callback}/client_outbound"
+
+        # Variables que el dialplan necesita en bridge_outbound.
+        target_pstn = (call.get("to") or "").lstrip("+")
         body = {
             "endpoint": endpoint,
-            "app": self.ari_app,
-            "appArgs": json.dumps({
-                "ami_call_id": call["id"],
-                "ami_mid": call["mid"],
-                "callback_sip_uri": call["callback_sip_uri"],
-                "from": call["from"],
-            }),
-            "callerId": call["from"],
+            "context": "from_internal",
+            "extension": "bridge_outbound",
+            "priority": 1,
+            "callerId": call.get("from") or "",
             "timeout": 30,
-            "channelId": call["id"],  # idempotencia + correlación
+            "channelId": call["id"],
+            "variables": {
+                "PSTN_TARGET": target_pstn,
+                "AMI_CALL_ID": call["id"],
+                "AMI_FROM": call.get("from") or "",
+            },
         }
         status, response = _http_post_json(
             f"{self.ari_url}/channels",
@@ -181,8 +203,6 @@ class LiveTelcoAdapter(TelcoAdapter):
             c = ami_api.STATE["calls"].get(call["id"])
             if c:
                 c["telco_ref"] = resp.get("id") or resp.get("name") or "asterisk"
-            # transiciones (ringing/in_progress/completed) llegan por webhook
-            # /v1/_telco/calls/{id}/status que el dialplan dispara.
         else:
             self._fail_call(call["id"], f"ari_http_{status}")
 

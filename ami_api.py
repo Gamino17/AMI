@@ -174,7 +174,7 @@ ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/poc-co/sip", "/internal/brief-co", "/internal/vps-co", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
 PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/admin/mobile-identities/manual", "/v1/waitlist", "/v1/_openai/realtime/webhook")
-PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject))$")
+PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject)|/v1/admin/mobile-identities/[^/]+/mint-agent-token)$")
 
 # Cache del install.sh leído del disco al arrancar.
 _INSTALL_SH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "install.sh")
@@ -7369,6 +7369,29 @@ class Handler(BaseHTTPRequestHandler):
                 "billing_email": acct["billing_email"],
                 "status": "active",
                 "created_at": acct["created_at"],
+            })
+
+        # Admin: mint un nuevo agent_token para un MID existente. Útil para
+        # PoC sin pasar por el flow contractual completo. El agent_token
+        # devuelto da acceso scoped a las APIs operacionales (SMS, voz) del MID.
+        m = re.match(r"^/v1/admin/mobile-identities/([^/]+)/mint-agent-token$", p)
+        if m:
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            mid = m.group(1)
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity:
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            plain, hashed = mint_agent_token(mid, identity.get("customer_id", ""))
+            event("agent_token_minted_admin", "mobile_identity", mid,
+                  {"prefix": plain[:18]})
+            return response(self, 201, {
+                "mid": mid,
+                "phone_number": identity.get("phone_number"),
+                "agent_token": plain,
+                "agent_token_hint": "Bearer scoped al MID. Útil para llamar "
+                                     "POST /v1/agent/calls/place, send_sms, etc. "
+                                     "Solo se muestra una vez.",
             })
 
         # OpenAI Realtime webhook · recibe realtime.call.incoming y acepta
