@@ -260,6 +260,18 @@ async def ari_hangup(channel_id: str) -> None:
     log.info("ari_hangup channel=%s status=%s", channel_id, status)
 
 
+async def ari_answer(channel_id: str) -> None:
+    """POST /channels/{id}/answer — descuelga el canal del llamante.
+
+    En el modelo Twilio, devolver TwiML que conecta/reproduce DESCUELGA la
+    llamada. Sin esto el llamante oye tono/"apagado" y no fluye el audio.
+    Idempotente, swallow errores.
+    """
+    url = f"{CONFIG.ari_base_http}/channels/{urllib.parse.quote(channel_id)}/answer"
+    status, _ = await _ari_request("POST", url)
+    log.info("ari_answer channel=%s status=%s", channel_id, status)
+
+
 async def ari_continue(channel_id: str) -> None:
     """POST /channels/{id}/continue — devuelve el channel al dialplan.
 
@@ -417,6 +429,10 @@ async def start_media_bridge(channel_id: str, ws_url: str,
         )
         await ari_hangup(channel_id)
         return
+    # Descolgar el canal del llamante (modelo Twilio: el <Connect><Stream>
+    # contesta la llamada). Sin esto el llamante oye tono/"apagado" y el audio
+    # no fluye porque el canal nunca pasa a 'answered'.
+    await ari_answer(channel_id)
     log.info(
         "start_media_bridge channel=%s call_sid=%s ws=%s",
         channel_id, call_sid, ws_url,

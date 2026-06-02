@@ -85,10 +85,12 @@ def ari_stubs(monkeypatch):
     hangup = _AsyncRecorder()
     play = _AsyncRecorder()
     cont = _AsyncRecorder()
+    answer = _AsyncRecorder()
     monkeypatch.setattr(bridge, "ari_hangup", hangup, raising=True)
     monkeypatch.setattr(bridge, "ari_play", play, raising=True)
     monkeypatch.setattr(bridge, "ari_continue", cont, raising=True)
-    return {"hangup": hangup, "play": play, "continue": cont}
+    monkeypatch.setattr(bridge, "ari_answer", answer, raising=True)
+    return {"hangup": hangup, "play": play, "continue": cont, "answer": answer}
 
 
 @pytest.fixture(autouse=True)
