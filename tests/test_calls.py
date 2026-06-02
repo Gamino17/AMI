@@ -323,6 +323,49 @@ def test_voice_config_takes_precedence_over_sip(
     assert r.json()["mode"] == "voice"
 
 
+# ---------------- voice_url en el ALTA (modelo Twilio) ----------------
+
+def _provision(client, sample_customer_payload, activate_extra=None):
+    """Flujo completo SIMRequest->oferta->contrato->firma->activate. Devuelve
+    la respuesta de activate (con activate_extra fusionado en su body)."""
+    r = client.post("/v1/sim-requests", json={"country": "ES", "sim_type": "eSIM"})
+    sim = r.json()["sim_request"]
+    offer = r.json()["offer"]
+    client.post(f"/v1/offers/{offer['id']}/accept")
+    cust = client.post(f"/v1/sim-requests/{sim['id']}/customer-data",
+                       json={"customer": sample_customer_payload})
+    customer = cust.json()["customer"]
+    contract = client.post("/v1/contracts",
+                           json={"offer_id": offer["id"], "customer_id": customer["id"]})
+    contract_id = contract.json()["id"]
+    client.post(f"/v1/contracts/{contract_id}/mock-sign")
+    payload = {"contract_id": contract_id}
+    payload.update(activate_extra or {})
+    return client.post("/v1/mobile-identities/activate", json=payload)
+
+
+def test_activate_with_voice_url_wires_number(client, sample_customer_payload):
+    # El agente entrega su Voice URL al provisionar -> el número nace cableado.
+    r = _provision(client, sample_customer_payload,
+                   {"voice_url": VOICE_URL})
+    assert r.status_code == 201
+    cfg = r.json()["voice_config"]
+    assert cfg["voice_url"] == VOICE_URL
+    assert cfg["id"].startswith("vcfg_")
+
+
+def test_activate_invalid_voice_url_is_400(client, sample_customer_payload):
+    r = _provision(client, sample_customer_payload, {"voice_url": "ftp://nope"})
+    assert r.status_code == 400
+    assert r.json()["error"] == "invalid_voice_url"
+
+
+def test_activate_without_voice_url_has_no_voice_config(client, sample_customer_payload):
+    r = _provision(client, sample_customer_payload)
+    assert r.status_code == 201
+    assert r.json().get("voice_config") is None
+
+
 # ---------------- telco webhooks ----------------
 
 @pytest.fixture

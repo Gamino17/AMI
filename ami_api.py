@@ -2136,7 +2136,7 @@ def _endpoints_for_landing():
         ("GET",  "/v1/contracts/{id}",                      "Consulta el contrato."),
         ("GET",  "/v1/sign/{id}",                           "Página HTML de firma (pública)."),
         ("POST", "/v1/sign/{id}/confirm",                   "Callback del form de firma (público)."),
-        ("POST", "/v1/mobile-identities/activate",          "Activa la MobileIdentity tras la firma."),
+        ("POST", "/v1/mobile-identities/activate",          "Activa la MobileIdentity tras la firma (acepta voice_url opcional: webhook de voz del agente)."),
         ("GET",  "/v1/mobile-identities/{id}",              "Consulta una MobileIdentity."),
         ("POST", "/v1/mobile-identities/{id}/rotate-token", "Rota el agent_token (hard rotate)."),
         ("POST", "/v1/mobile-identities/{id}/inbound-config","Setea el endpoint SIP para llamadas entrantes."),
@@ -8213,6 +8213,25 @@ class Handler(BaseHTTPRequestHandler):
                 "activated_at": now(),
                 "account_id": contract.get("account_id") or _request_account_id(self),
             }
+            # Webhook de voz OPCIONAL aportado en el alta (modelo Twilio: el
+            # agente entrega su Voice URL al provisionar y el número nace ya
+            # cableado a su webhook). Si no viene, se puede setear/cambiar luego
+            # con POST /v1/mobile-identities/{mid}/voice-config.
+            voice_url = data.get("voice_url")
+            if voice_url not in (None, ""):
+                vu = str(voice_url).strip()
+                allow_http = os.environ.get("AMI_VOICE_ALLOW_HTTP") == "1"
+                if not (vu.startswith("https://")
+                        or (allow_http and vu.startswith("http://"))):
+                    return response(self, 400, {"error": "invalid_voice_url",
+                        "detail": "expected https:// URL "
+                                  "(set AMI_VOICE_ALLOW_HTTP=1 to allow http:// in dev)"})
+                identity["voice_config"] = ami_voice_streams.new_voice_config(
+                    vu,
+                    status_callback_url=data.get("status_callback_url"),
+                    voice_method=data.get("voice_method", "POST"),
+                    status_callback_method=data.get("status_callback_method", "POST"),
+                )
             STATE["mobile_identities"][mid] = identity
             # Audit log mínimo (sin phone_number ni QR url completa).
             event("mobile_identity_active", "mobile_identity", mid,
