@@ -22,11 +22,28 @@
 
 set -eu
 
-CALLER="$1"
-DEST="$2"
+CALLER_RAW="$1"
+DEST_RAW="$2"
 CHAN="$3"
 AMI_URL="$4"
 TELCO_KEY="$5"
+
+# Normaliza a E.164. El partner manda el DID y el From sin código país
+# (ej. "3336033869"). AMI requiere "+57...". Si el número no empieza por
+# "+", asumimos código país del partner (CO: +57). El default se puede
+# overrider con AMI_DEFAULT_CC en el entorno de Asterisk si toca cambiar
+# de país.
+DEFAULT_CC="${AMI_DEFAULT_CC:-+57}"
+normalize() {
+  local n="$1"
+  case "$n" in
+    +*) echo "$n" ;;
+    "") echo "" ;;
+    *)  echo "${DEFAULT_CC}${n}" ;;
+  esac
+}
+CALLER="$(normalize "$CALLER_RAW")"
+DEST="$(normalize "$DEST_RAW")"
 
 # Cuerpo JSON. Las llaves se escapan en Bash con dobles llaves.
 BODY=$(printf '{"from":"%s","to":"%s","telco_ref":"%s"}' "$CALLER" "$DEST" "$CHAN")

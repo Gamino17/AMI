@@ -172,7 +172,7 @@ ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
 PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/poc-co/sip", "/internal/brief-co", "/internal/vps-co", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
-PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/waitlist")
+PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/admin/mobile-identities/manual", "/v1/waitlist")
 PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject))$")
 
 # Cache del install.sh leído del disco al arrancar.
@@ -7368,6 +7368,56 @@ class Handler(BaseHTTPRequestHandler):
                 "billing_email": acct["billing_email"],
                 "status": "active",
                 "created_at": acct["created_at"],
+            })
+
+        # Admin: provisionar un MID manualmente con un número/sip_uri concretos.
+        # Útil para PoC con un partner telco real que ya nos asigna el número,
+        # saltando el flow contractual completo (customer→contract→sign).
+        # Body: {phone_number, inbound_sip_uri, customer_name (opt), account_id (opt)}.
+        if p == "/v1/admin/mobile-identities/manual":
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            try: data = read_json(self)
+            except Exception as e:
+                return response(self, 400, {"error": "invalid_json", "detail": str(e)})
+            phone = _normalize_msisdn(data.get("phone_number") or "")
+            if not phone:
+                return response(self, 400, {"error": "invalid_phone_number",
+                                             "detail": "Requires E.164 (e.g. +573336033869)"})
+            sip_uri = (data.get("inbound_sip_uri") or "").strip() or None
+            account_id = data.get("account_id") or "cust_default"
+            # Si ya hay un MID activo con ese número, lo devolvemos (idempotente).
+            existing_mid, existing_id = _find_mid_by_phone(phone)
+            if existing_mid:
+                if sip_uri:
+                    existing_id["inbound_sip_uri"] = sip_uri
+                event("mobile_identity_manual_updated", "mobile_identity", existing_mid,
+                      {"phone_number": phone, "inbound_sip_uri": sip_uri})
+                return response(self, 200, {
+                    "id": existing_mid, "phone_number": phone,
+                    "inbound_sip_uri": sip_uri, "status": "active",
+                    "reused": True,
+                })
+            mid = new_id("mid")
+            identity = {
+                "id": mid, "status": "active", "phone_number": phone,
+                "sim_type": "eSIM",
+                "capabilities": ["sms", "voice", "data"],
+                "account_id": account_id,
+                "inbound_sip_uri": sip_uri,
+                "provider_activation_id": new_id("manualact"),
+                "activated_at": now(),
+                "provenance": "admin_manual",
+            }
+            STATE["mobile_identities"][mid] = identity
+            event("mobile_identity_manual_created", "mobile_identity", mid,
+                  {"phone_number": phone, "inbound_sip_uri": sip_uri,
+                   "account_id": account_id})
+            return response(self, 201, {
+                "id": mid, "phone_number": phone,
+                "inbound_sip_uri": sip_uri,
+                "status": "active",
+                "account_id": account_id,
             })
 
         # Admin: rotar la API key de un customer (hard rotate).
