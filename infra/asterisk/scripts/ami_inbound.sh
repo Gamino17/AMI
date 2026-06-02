@@ -22,11 +22,19 @@
 
 set -eu
 
-CALLER_RAW="$1"
-DEST_RAW="$2"
-CHAN="$3"
-AMI_URL="$4"
-TELCO_KEY="$5"
+CALLER_RAW="${1:-}"
+DEST_RAW="${2:-}"
+CHAN="${3:-}"
+AMI_URL="${4:-}"
+TELCO_KEY="${5:-}"
+
+# Debug log a /tmp para diagnosticar invocaciones del dialplan.
+LOG=/tmp/ami_inbound_debug.log
+{
+  echo "---- $(date -u '+%Y-%m-%dT%H:%M:%SZ') invocation ----"
+  echo "args: CALLER=[$CALLER_RAW] DEST=[$DEST_RAW] CHAN=[$CHAN]"
+  echo "args: AMI_URL=[$AMI_URL] TELCO_KEY_set=$([ -n "$TELCO_KEY" ] && echo yes || echo NO)"
+} >> "$LOG" 2>/dev/null || true
 
 # Normaliza a E.164. El partner manda el DID y el From sin código país
 # (ej. "3336033869"). AMI requiere "+57...". Si el número no empieza por
