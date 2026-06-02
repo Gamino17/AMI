@@ -237,6 +237,92 @@ def test_clear_inbound_sip_uri_with_null(client, active_identity):
     assert r.json()["inbound_sip_uri"] is None
 
 
+# ---------------- voice-config (bridge Twilio-compat) ----------------
+
+VOICE_URL = "https://agent.example.com/voice/webhook"
+
+
+def test_set_voice_config(client, active_identity):
+    mid = active_identity["mid"]
+    r = client.post(
+        f"/v1/mobile-identities/{mid}/voice-config",
+        json={"voice_url": VOICE_URL},
+    )
+    assert r.status_code == 200
+    cfg = r.json()["voice_config"]
+    assert cfg["voice_url"] == VOICE_URL
+    assert cfg["id"].startswith("vcfg_")
+
+
+def test_set_voice_config_invalid_scheme_is_400(client, active_identity):
+    mid = active_identity["mid"]
+    r = client.post(
+        f"/v1/mobile-identities/{mid}/voice-config",
+        json={"voice_url": "ftp://bad/hook"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"] == "invalid_voice_url"
+
+
+def test_clear_voice_config_with_null(client, active_identity):
+    mid = active_identity["mid"]
+    client.post(f"/v1/mobile-identities/{mid}/voice-config",
+                json={"voice_url": VOICE_URL})
+    r = client.post(f"/v1/mobile-identities/{mid}/voice-config",
+                    json={"voice_url": None})
+    assert r.status_code == 200
+    assert r.json()["voice_config"] is None
+
+
+def test_get_voice_config(client, active_identity):
+    mid = active_identity["mid"]
+    client.post(f"/v1/mobile-identities/{mid}/voice-config",
+                json={"voice_url": VOICE_URL})
+    r = client.get(f"/v1/mobile-identities/{mid}/voice-config")
+    assert r.status_code == 200
+    assert r.json()["voice_config"]["voice_url"] == VOICE_URL
+
+
+def test_inbound_route_with_voice_config_returns_voice_mode(
+        client, anon_client, active_identity, telco_key):
+    mid = active_identity["mid"]
+    phone = active_identity["identity"]["phone_number"]
+    client.post(f"/v1/mobile-identities/{mid}/voice-config",
+                json={"voice_url": VOICE_URL})
+
+    r = anon_client.post(
+        "/v1/_telco/calls/inbound",
+        headers={"X-Telco-Key": telco_key},
+        json={"from": "+34611000000", "to": phone, "telco_ref": "ast:voice"},
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["mode"] == "voice"
+    assert body["voice_url"] == VOICE_URL
+    assert body["mid"] == mid
+    assert body["call_id"].startswith("call_")
+    assert "forward_sip_uri" not in body
+
+
+def test_voice_config_takes_precedence_over_sip(
+        client, anon_client, active_identity, telco_key):
+    """Con voice_url Y inbound_sip_uri, la entrante va al modo voice (Stasis)."""
+    mid = active_identity["mid"]
+    phone = active_identity["identity"]["phone_number"]
+    client.post(f"/v1/mobile-identities/{mid}/inbound-config",
+                json={"inbound_sip_uri": REALTIME_URI})
+    client.post(f"/v1/mobile-identities/{mid}/voice-config",
+                json={"voice_url": VOICE_URL})
+
+    r = anon_client.post(
+        "/v1/_telco/calls/inbound",
+        headers={"X-Telco-Key": telco_key},
+        json={"from": "+34611000000", "to": phone, "telco_ref": "ast:prec"},
+    )
+    assert r.status_code == 201
+    assert r.json()["mode"] == "voice"
+
+
 # ---------------- telco webhooks ----------------
 
 @pytest.fixture

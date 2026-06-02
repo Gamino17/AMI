@@ -115,6 +115,29 @@ services:
       - "8088:8088"                     # ARI / Stasis
     networks: [ami_net]
 
+  ami_voice_bridge:
+    # Capa SIGNALING del puente de voz Twilio-compat (Paso 2/3). Proceso Python
+    # async independiente: mantiene un WS contra ARI /ari/events (Stasis app
+    # 'ami_voice'), despacha el webhook estilo Twilio al voice_url del cliente y
+    # ejecuta el TwiML contra ARI REST. NO publica puertos en Paso 2 (el WS de
+    # eventos es saliente hacia asterisk; /health es interno). Paso 3 añadirá RTP.
+    build:
+      context: ..
+      dockerfile: infra/ami_voice_bridge/Dockerfile
+    container_name: ami_voice_bridge
+    restart: unless-stopped
+    environment:
+      AMI_ARI_URL: "http://asterisk:8088/ari"
+      AMI_ARI_USERNAME: ${ARI_USERNAME}
+      AMI_ARI_PASSWORD: ${ARI_PASSWORD}
+      AMI_ARI_APP: "ami_voice"
+      AMI_VOICE_BRIDGE_HEALTH_PORT: "8090"
+      AMI_VOICE_WEBHOOK_TIMEOUT: "5"
+      AMI_VOICE_LOG_LEVEL: "INFO"
+    depends_on:
+      - asterisk
+    networks: [ami_net]
+
 networks:
   ami_net:
     driver: bridge

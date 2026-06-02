@@ -12,9 +12,11 @@
 #   - otro                                    → idem (caller decide reject).
 #
 # Output (UNA línea, parseable con CUT en dialplan):
-#   FORWARD=sip:user@host:port|CALL_ID=call_xxx|MID=mid_xxx
+#   FORWARD=sip:user@host:port|CALL_ID=call_xxx|MID=mid_xxx|VOICE_URL=|MID_PHONE=
+# o, en modo voice (MID con voice-config, bridge Twilio-compat):
+#   FORWARD=|CALL_ID=call_xxx|MID=mid_xxx|VOICE_URL=https://...|MID_PHONE=+57...
 # o, en caso de error/409:
-#   FORWARD=|CALL_ID=|MID=
+#   FORWARD=|CALL_ID=|MID=|VOICE_URL=|MID_PHONE=
 #
 # NO depende de jq — usamos sed/grep para extraer los campos del JSON simple
 # que devuelve AMI. La estructura del JSON es plana (sin objetos anidados),
@@ -83,5 +85,10 @@ extract() {
 FORWARD=$(extract "$HTTP_BODY" "forward_sip_uri")
 CALL_ID=$(extract "$HTTP_BODY" "call_id")
 MID=$(extract "$HTTP_BODY" "mid")
+# Modo voice (bridge Twilio-compat): cuando el MID tiene voice-config, AMI
+# devuelve {mode:"voice", voice_url, mid_phone} en vez de forward_sip_uri. El
+# dialplan ramifica a Stasis(ami_voice) si VOICE_URL no está vacío.
+VOICE_URL=$(extract "$HTTP_BODY" "voice_url")
+MID_PHONE=$(extract "$HTTP_BODY" "mid_phone")
 
-echo "FORWARD=${FORWARD}|CALL_ID=${CALL_ID}|MID=${MID}"
+echo "FORWARD=${FORWARD}|CALL_ID=${CALL_ID}|MID=${MID}|VOICE_URL=${VOICE_URL}|MID_PHONE=${MID_PHONE}"

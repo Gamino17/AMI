@@ -39,6 +39,7 @@ import ami_internal_brief
 import ami_vps_runbook
 import ami_openai_realtime
 import ami_log
+import ami_voice_streams  # signaling Twilio-compat del bridge de voz (Paso 1)
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
 MAX_BODY_BYTES = int(os.environ.get("AMI_MAX_BODY_BYTES") or 1_000_000)  # 1 MB
@@ -1037,6 +1038,34 @@ def route_call_inbound(from_raw, to_raw, telco_ref=None):
         return 404, {"error": "destination_not_found", "to": to}
     if identity.get("status") != "active":
         return 409, {"error": "mobile_identity_not_active", "mid": mid}
+    # Precedencia voice-config: si el MID tiene un voice_url registrado, la
+    # entrante va al bridge ami_voice (Stasis) en vez del SIP-forward directo.
+    # El dialplan ramifica a Stasis(ami_voice) cuando la respuesta trae mode=voice.
+    vcfg = identity.get("voice_config")
+    if vcfg and vcfg.get("voice_url"):
+        call = {
+            "id": new_id("call"),
+            "mid": mid,
+            "direction": "inbound",
+            "from": _normalize_msisdn(from_raw) or from_raw,
+            "to": to,
+            "status": "initiated",
+            "created_at": now(),
+            "started_at": None,
+            "ended_at": None,
+            "duration_sec": None,
+            "hangup_cause": None,
+            "telco_ref": telco_ref,
+            "voice_url": vcfg["voice_url"],
+            "mode": "voice_stasis",
+        }
+        STATE["calls"][call["id"]] = call
+        event("call_inbound_routed", "call", call["id"],
+              {"mid": mid, "from": call["from"], "mode": "voice_stasis"})
+        ami_webhooks.dispatch_event("call.inbound", mid, call)
+        return 201, {"call_id": call["id"], "mode": "voice",
+                     "voice_url": vcfg["voice_url"],
+                     "mid_phone": identity.get("phone_number"), "mid": mid}
     sip_uri = identity.get("inbound_sip_uri")
     if not sip_uri:
         # No hay endpoint configurado para entrantes — el partner debe rechazar.
@@ -7159,6 +7188,15 @@ class Handler(BaseHTTPRequestHandler):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
             return response(self, 200, ami_limits.usage_snapshot(identity))
 
+        # Leer la voice-config (bridge Twilio-compat) de un MID. Auth: customer.
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/voice-config$", p)
+        if m:
+            identity = STATE["mobile_identities"].get(m.group(1))
+            if not identity or not _scoped(identity, _request_account_id(self)):
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            return response(self, 200, {"mid": m.group(1),
+                                        "voice_config": identity.get("voice_config")})
+
         # Admin: listar customer-accounts (auth: AMI_ADMIN_KEY).
         if p == "/v1/admin/customers":
             if not check_admin_auth(self):
@@ -8095,6 +8133,39 @@ class Handler(BaseHTTPRequestHandler):
             event("mid_inbound_config_updated", "mobile_identity", mid,
                   {"inbound_sip_uri": identity["inbound_sip_uri"]})
             return response(self, 200, {"mid": mid, "inbound_sip_uri": identity["inbound_sip_uri"]})
+
+        # Setea/limpia la voice-config (voice_url estilo Twilio) de un MID.
+        # Auth: API key del customer. Con voice_url, route_call_inbound enruta
+        # las entrantes al bridge ami_voice (Stasis) en vez del SIP-forward.
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/voice-config$", p)
+        if m:
+            mid = m.group(1)
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity or not _scoped(identity, _request_account_id(self)):
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            voice_url = data.get("voice_url")
+            # Permitimos null/"" para limpiar la config.
+            if voice_url in (None, ""):
+                identity["voice_config"] = None
+                event("mid_voice_config_cleared", "mobile_identity", mid, {})
+                return response(self, 200, {"mid": mid, "voice_config": None})
+            vu = str(voice_url).strip()
+            allow_http = os.environ.get("AMI_VOICE_ALLOW_HTTP") == "1"
+            if not (vu.startswith("https://")
+                    or (allow_http and vu.startswith("http://"))):
+                return response(self, 400, {"error": "invalid_voice_url",
+                    "detail": "expected https:// URL "
+                              "(set AMI_VOICE_ALLOW_HTTP=1 to allow http:// in dev)"})
+            cfg = ami_voice_streams.new_voice_config(
+                vu,
+                status_callback_url=data.get("status_callback_url"),
+                voice_method=data.get("voice_method", "POST"),
+                status_callback_method=data.get("status_callback_method", "POST"),
+            )
+            identity["voice_config"] = cfg
+            event("mid_voice_config_updated", "mobile_identity", mid,
+                  {"voice_config_id": cfg["id"], "voice_url": cfg["voice_url"]})
+            return response(self, 200, {"mid": mid, "voice_config": cfg})
 
         # Activar MobileIdentity (telco mock = lo único realmente simulado)
         # Rotación de agent_token. Auth: API key del customer (Nivel 1).
