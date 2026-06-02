@@ -137,7 +137,7 @@ services:
       # Jitter buffer de salida (openclaw->llamante) en ms. Tunable sin rebuild
       # via .env del VPS: subir si hay underruns (audio cortado), bajar si hay
       # lag. Default 150ms (estandar telefonia 40-200ms).
-      AMI_VOICE_JITTER_MS: "${AMI_VOICE_JITTER_MS:-120}"
+      AMI_VOICE_JITTER_MS: "${AMI_VOICE_JITTER_MS:-60}"
       # Host (DNS interno de ami_net) que Asterisk usa como external_host del
       # externalMedia. El puerto UDP es efímero por sesión (lo elige el bridge);
       # el RTP asterisk<->bridge es trafico container-a-container en ami_net,
