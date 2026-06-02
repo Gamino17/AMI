@@ -6,13 +6,14 @@ Sin dependencias externas. La SIM física es lo único stub: el resto del flujo
 como producción y respeta la máquina de estados de la spec §17.6.
 """
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from datetime import datetime, timedelta, timezone
 import hashlib, json, os, re, secrets, threading, uuid
 
 from ami_telco import get_active_adapter
 import ami_webhooks
 import ami_limits
+import ami_numbers
 import ami_panel
 import ami_storage
 import ami_metrics
@@ -98,6 +99,10 @@ STATE = {
     "customers": {},
     "contracts": {},
     "mobile_identities": {},
+    # Inventario de números E.164 del partner. e164 -> {number,country,
+    # capabilities,status,mid,source,created_at,assigned_at}. Pool-first
+    # allocation en activate, fallback a mock si vacío.
+    "numbers": {},
     "events": [],
     # Scoped agent tokens (Nivel 2 de auth).
     # token_hash (sha256 hex) -> {mid, customer_id, token_prefix, created_at, status, revoked_at, revoke_reason}
@@ -172,10 +177,10 @@ API_KEY = os.environ.get("AMI_API_KEY") or None
 ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
-PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/poc-co/sip", "/internal/brief-co", "/internal/vps-co", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
+PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/poc-co/sip", "/internal/brief-co", "/internal/vps-co", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc", "/v1/admin/numbers")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
-PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/admin/mobile-identities/manual", "/v1/waitlist", "/v1/_openai/realtime/webhook")
-PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject)|/v1/admin/mobile-identities/[^/]+/mint-agent-token)$")
+PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/admin/mobile-identities/manual", "/v1/admin/numbers", "/v1/waitlist", "/v1/_openai/realtime/webhook")
+PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject)|/v1/admin/mobile-identities/[^/]+/mint-agent-token|/v1/admin/numbers/[^/]+/disable)$")
 
 # Cache del install.sh leído del disco al arrancar.
 _INSTALL_SH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "install.sh")
@@ -7226,6 +7231,15 @@ class Handler(BaseHTTPRequestHandler):
                 vc["signing_secret"] = _redact_secret(vc.get("signing_secret"))
             return response(self, 200, {"mid": m.group(1), "voice_config": vc})
 
+        # Admin: inventario de números (auth: AMI_ADMIN_KEY).
+        if p == "/v1/admin/numbers":
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            q = urlparse(self.path).query
+            params = dict(kv.split("=", 1) for kv in q.split("&") if "=" in kv)
+            return response(self, 200, ami_numbers.list_numbers(
+                STATE, status=params.get("status"), country=params.get("country")))
+
         # Admin: listar customer-accounts (auth: AMI_ADMIN_KEY).
         if p == "/v1/admin/customers":
             if not check_admin_auth(self):
@@ -7422,6 +7436,53 @@ class Handler(BaseHTTPRequestHandler):
         if not is_public("POST", p) and not check_auth(self):
             return response(self, 401, {"error": "unauthorized"})
 
+        # Admin: cargar números al inventario (auth: AMI_ADMIN_KEY).
+        # Body: {numbers:[...] o number:'...', country, capabilities?, source?}.
+        if p == "/v1/admin/numbers":
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            try:
+                data = read_json(self)
+            except Exception as e:
+                return response(self, 400, {"error": "invalid_json", "detail": str(e)})
+            country = data.get("country")
+            if country not in COUNTRIES:
+                return response(self, 400, {"error": "unsupported_country",
+                    "country": country,
+                    "detail": "country must be one of " + ", ".join(COUNTRIES)})
+            nums = data.get("numbers")
+            if nums is None and data.get("number"):
+                nums = [data.get("number")]
+            if not isinstance(nums, list) or not nums:
+                return response(self, 400, {"error": "no_numbers",
+                    "detail": "provide 'numbers': [..] or 'number': '..'"})
+            res = ami_numbers.add_numbers(
+                STATE, nums, country,
+                capabilities=data.get("capabilities"),
+                source=data.get("source"), now_fn=now,
+                prefix=COUNTRIES[country]["msisdn_prefix"],
+            )
+            event("numbers_added", "number_pool", country,
+                  {"added": len(res["added"]), "skipped": len(res["skipped_dupes"]),
+                   "invalid": len(res["invalid"])})
+            return response(self, 201, {
+                "added": res["added"],
+                "skipped": res["skipped_dupes"],
+                "invalid": res["invalid"],
+                "count": len(res["added"]),
+            })
+
+        # Admin: deshabilitar un número del inventario (no se vuelve a asignar).
+        m = re.match(r"^/v1/admin/numbers/([^/]+)/disable$", p)
+        if m:
+            if not check_admin_auth(self):
+                return response(self, 401, {"error": "unauthorized_admin"})
+            rec = ami_numbers.disable_number(STATE, unquote(m.group(1)))
+            if rec is None:
+                return response(self, 404, {"error": "number_not_found"})
+            event("number_disabled", "number_pool", rec["number"], {})
+            return response(self, 200, {"number": rec["number"], "status": rec["status"]})
+
         # Admin: crear customer-account (auth: AMI_ADMIN_KEY).
         # Body: {name, billing_email}. Devuelve la api_key en plano UNA SOLA VEZ.
         if p == "/v1/admin/customers":
@@ -7538,6 +7599,12 @@ class Handler(BaseHTTPRequestHandler):
                 "provenance": "admin_manual",
             }
             STATE["mobile_identities"][mid] = identity
+            # Reflejar el número en el inventario como 'assigned' (consistencia
+            # con el pool; el PoC usó este camino manual). País derivado del prefijo.
+            _c = next((c for c, v in COUNTRIES.items()
+                       if phone.startswith(v["msisdn_prefix"])), None)
+            ami_numbers.upsert_assigned(STATE, phone, mid, country=_c,
+                                        source="admin_manual", now_fn=now)
             event("mobile_identity_manual_created", "mobile_identity", mid,
                   {"phone_number": phone, "inbound_sip_uri": sip_uri,
                    "account_id": account_id})
@@ -8282,7 +8349,20 @@ class Handler(BaseHTTPRequestHandler):
             if req and req["status"] == "signed":
                 transition_sim_request(req, "provisioning")
             mid = new_id("mid")
-            phone = "+34 600 " + str(int(uuid.uuid4().hex[:6], 16))[-6:].rjust(6, "0")[:6]
+            # Pool-first: asigna un número REAL del inventario que matchee el
+            # país de la oferta. Si el pool está vacío o sin match -> fallback
+            # al número mock histórico (no rompe dev/tests). El día que el
+            # partner cargue números reales, el alta los reparte solo.
+            _alloc = ami_numbers.allocate_number(STATE, mid, country=offer.get("country"))
+            if _alloc:
+                phone = _alloc["number"]
+                event("number_allocated", "mobile_identity", mid,
+                      {"number": phone, "country": offer.get("country"),
+                       "source": _alloc.get("source")})
+            else:
+                phone = "+34 600 " + str(int(uuid.uuid4().hex[:6], 16))[-6:].rjust(6, "0")[:6]
+                event("number_mock_fallback", "mobile_identity", mid,
+                      {"country": offer.get("country")})
             identity = {
                 "id": mid, "status": "active", "phone_number": phone,
                 "sim_type": offer["sim_type"], "capabilities": offer["capabilities"],

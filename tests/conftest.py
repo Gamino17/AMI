@@ -83,6 +83,7 @@ def reset_state(ami_api_module):
     state["customers"].clear()
     state["contracts"].clear()
     state["mobile_identities"].clear()
+    state.get("numbers", {}).clear()
     state["events"].clear()
     state.get("agent_tokens", {}).clear()
     state.get("sms_messages", {}).clear()
