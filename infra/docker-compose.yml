@@ -140,12 +140,13 @@ services:
       # sin mapeo de puertos al host.
       AMI_VOICE_BRIDGE_RTP_HOST: "ami_voice_bridge"
       # Para resolver el signing_secret del MID via el endpoint interno de AMI
-      # (X-Telco-Key). El secreto de firma NO va aqui: se obtiene por MID.
-      AMI_API_URL: "http://ami_api:8000"
+      # (X-Telco-Key). Debe ser el MISMO backend que usa ami_inbound.sh
+      # (AMI_PUBLIC_URL), donde vive el voice_config: Render, no el ami_api local.
+      # El secreto de firma NO va aqui: se obtiene por MID.
+      AMI_API_URL: "${AMI_PUBLIC_URL:-https://protocolami.com}"
       AMI_TELCO_INBOUND_KEY: ${AMI_TELCO_INBOUND_KEY}
     depends_on:
       - asterisk
-      - ami_api
     networks: [ami_net]
 
 networks:
