@@ -37,6 +37,7 @@ import ami_poc_co
 import ami_sip_interconnect
 import ami_internal_brief
 import ami_vps_runbook
+import ami_openai_realtime
 import ami_log
 
 # Caps de seguridad / DoS. Tunables por env si hace falta.
@@ -172,7 +173,7 @@ ADMIN_KEY = os.environ.get("AMI_ADMIN_KEY") or None
 # Rutas públicas (no requieren API key): landing, descubrimiento, install y firma desde el navegador.
 PUBLIC_GET_PATHS = ("/", "/index.html", "/v1/health", "/llms.txt", "/openapi.json", "/install.sh", "/favicon.ico", "/spec", "/partners", "/experience", "/diagram", "/docs", "/live", "/use-cases", "/pricing", "/calculator", "/waitlist", "/pitch", "/sandbox", "/status", "/security", "/panel", "/panel/login", "/panel/kyc", "/poc-co", "/poc-co/sip", "/internal/brief-co", "/internal/vps-co", "/metrics", "/v1/admin/customers", "/v1/admin/waitlist", "/v1/admin/kyc")
 PUBLIC_GET_REGEX = re.compile(r"^/(v1/sign/[^/]+|identity/[^/]+|panel/mid/[^/]+|kyc/[^/]+)$")
-PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/admin/mobile-identities/manual", "/v1/waitlist")
+PUBLIC_POST_PATHS = ("/v1/demo/quick", "/panel/login", "/panel/logout", "/panel/kyc/login", "/panel/kyc/logout", "/v1/admin/customers", "/v1/admin/mobile-identities/manual", "/v1/waitlist", "/v1/_openai/realtime/webhook")
 PUBLIC_POST_REGEX = re.compile(r"^(/v1/sign/[^/]+/confirm|/v1/admin/customers/[^/]+/(rotate-key|suspend|activate)|/kyc/[^/]+/submit|/v1/admin/kyc/purge|/v1/admin/backup/now|/v1/admin/kyc/[^/]+/(verify|reject))$")
 
 # Cache del install.sh leído del disco al arrancar.
@@ -7369,6 +7370,21 @@ class Handler(BaseHTTPRequestHandler):
                 "status": "active",
                 "created_at": acct["created_at"],
             })
+
+        # OpenAI Realtime webhook · recibe realtime.call.incoming y acepta
+        # la llamada. NO requiere auth admin/customer porque OpenAI firma con
+        # webhook-signature; verificamos HMAC contra OPENAI_WEBHOOK_SECRET en
+        # el handler. Si el secret no está seteado, modo DEV (acepta todo,
+        # log a stderr).
+        if p == "/v1/_openai/realtime/webhook":
+            try:
+                n = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(n) if n > 0 else b""
+            except Exception as e:
+                return response(self, 400, {"error": "read_error", "detail": str(e)})
+            wh_headers = {k.lower(): v for k, v in self.headers.items()}
+            code, body_out = ami_openai_realtime.handle_webhook(wh_headers, raw)
+            return response(self, code, body_out)
 
         # Admin: provisionar un MID manualmente con un número/sip_uri concretos.
         # Útil para PoC con un partner telco real que ya nos asigna el número,
