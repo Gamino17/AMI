@@ -139,8 +139,13 @@ services:
       # el RTP asterisk<->bridge es trafico container-a-container en ami_net,
       # sin mapeo de puertos al host.
       AMI_VOICE_BRIDGE_RTP_HOST: "ami_voice_bridge"
+      # Para resolver el signing_secret del MID via el endpoint interno de AMI
+      # (X-Telco-Key). El secreto de firma NO va aqui: se obtiene por MID.
+      AMI_API_URL: "http://ami_api:8000"
+      AMI_TELCO_INBOUND_KEY: ${AMI_TELCO_INBOUND_KEY}
     depends_on:
       - asterisk
+      - ami_api
     networks: [ami_net]
 
 networks:

@@ -30,7 +30,11 @@ La capa de AUDIO (puente RTP↔WebSocket Media Streams) vive en
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
+import secrets
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,7 +46,8 @@ import xml.etree.ElementTree as ET
 def new_voice_config(voice_url: str,
                      status_callback_url: str | None = None,
                      voice_method: str = "POST",
-                     status_callback_method: str = "POST") -> dict:
+                     status_callback_method: str = "POST",
+                     signing_secret: str | None = None) -> dict:
     """Construye el record VoiceConfig (lo persiste el caller en STATE).
 
     `voice_url` es el equivalente a "Voice URL" del número en Twilio:
@@ -56,6 +61,7 @@ def new_voice_config(voice_url: str,
         "voice_method": (voice_method or "POST").upper(),
         "status_callback_url": status_callback_url,
         "status_callback_method": (status_callback_method or "POST").upper(),
+        "signing_secret": signing_secret,
         "created_at": now(),
         "updated_at": now(),
     }
@@ -208,11 +214,95 @@ def _strip_ns(tag: str) -> str:
     return tag
 
 
+# ====================== FIRMA DEL WEBHOOK (X-AMI-Signature) ======================
+#
+# Esquema AUTORITATIVO del protocolo AMI (entregado a openclaw, NO cambiar):
+#   Cabecera:  X-AMI-Signature: t=<unix_segundos>,v1=<hex_minuscula>
+#   v1 = HMAC_SHA256(secret, f"{t}.{raw_body}")  (raw_body = bytes EXACTOS del POST)
+#   secret = 'amiwhsec_' + token_hex(32). Verificador anti-replay |now - t| <= 300s.
+
+_SIGNING_SECRET_PREFIX = "amiwhsec_"
+_SIGNATURE_TOLERANCE_S = 300
+
+
+def new_signing_secret() -> str:
+    """Genera un signing_secret dedicado para X-AMI-Signature.
+
+    Formato: 'amiwhsec_' + 64 hex (token_hex(32)). Es SENSIBLE: solo se muestra
+    en claro una vez (en la respuesta de activate / voice-config-set), nunca se
+    loguea ni se devuelve en GET ni se mete en el dialplan.
+    """
+    return _SIGNING_SECRET_PREFIX + secrets.token_hex(32)
+
+
+def ami_webhook_signature(secret: str, ts: int, raw_body: bytes | str) -> str:
+    """Calcula el v1 (hex minuscula) de la cabecera X-AMI-Signature.
+
+    Firma EXACTAMENTE  f"{ts}.{raw_body}"  donde raw_body son los bytes del
+    cuerpo POST que AMI envia. Acepta bytes o str (los bytes se decodifican
+    utf-8) para que el caller firme el MISMO `data` que manda. Devuelve solo el
+    hex; el caller compone la cabecera completa.
+    """
+    if isinstance(raw_body, bytes):
+        raw_body = raw_body.decode("utf-8")
+    signed_payload = f"{int(ts)}.{raw_body}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), signed_payload,
+                    hashlib.sha256).hexdigest()
+
+
+def build_ami_signature_header(secret: str, raw_body: bytes | str,
+                               ts: int | None = None) -> str:
+    """Compone la cabecera completa  't=<unix_seg>,v1=<hex>'.
+
+    `ts` se puede inyectar (vectores deterministas en tests); por defecto
+    time.time() en SEGUNDOS.
+    """
+    if ts is None:
+        ts = int(time.time())
+    ts = int(ts)
+    sig = ami_webhook_signature(secret, ts, raw_body)
+    return f"t={ts},v1={sig}"
+
+
+def verify_ami_signature(secret: str, header: str, raw_body: bytes | str,
+                         tolerance: int = _SIGNATURE_TOLERANCE_S,
+                         now: float | None = None) -> bool:
+    """Verifica una cabecera X-AMI-Signature (referencia/recipe para tests y docs).
+
+    Reglas: parsea 't=<seg>,v1=<hex>' (tolera espacios/orden, ignora extras);
+    rechaza si falta t o v1 o t no es int; anti-replay |now - t| > tolerance;
+    comparacion en tiempo constante. `now` inyectable (segundos) para tests.
+    """
+    if not header:
+        return False
+    parts = {}
+    for item in header.split(","):
+        item = item.strip()
+        if "=" in item:
+            k, _, v = item.partition("=")
+            parts[k.strip()] = v.strip()
+    t_raw = parts.get("t")
+    presented = parts.get("v1")
+    if not t_raw or not presented:
+        return False
+    try:
+        t = int(t_raw)
+    except (TypeError, ValueError):
+        return False
+    now_s = int(now if now is not None else time.time())
+    if abs(now_s - t) > tolerance:
+        return False
+    expected = ami_webhook_signature(secret, t, raw_body)
+    return hmac.compare_digest(expected, presented)
+
+
 # ====================== WEBHOOK DISPATCH ======================
 
 def dispatch_voice_webhook(voice_url: str, payload: dict[str, str],
                            method: str = "POST",
-                           timeout: float = 5.0) -> tuple[int, bytes, list[dict]]:
+                           timeout: float = 5.0,
+                           signing_secret: str | None = None,
+                           sign_ts: int | None = None) -> tuple[int, bytes, list[dict]]:
     """Hace el POST form-urlencoded al voice_url del cliente y parsea la
     respuesta TwiML. Devuelve (http_status, raw_body, parsed_actions).
 
@@ -227,6 +317,14 @@ def dispatch_voice_webhook(voice_url: str, payload: dict[str, str],
         data = urllib.parse.urlencode(payload).encode("utf-8")
         req = urllib.request.Request(voice_url, data=data, method="POST")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        # X-AMI-Signature: firmamos los MISMOS bytes `data` que enviamos
+        # (urlencode fija el orden; el cliente verifica sobre el rawBody recibido,
+        # no re-serializa). El secreto NUNCA se loguea.
+        if signing_secret:
+            req.add_header(
+                "X-AMI-Signature",
+                build_ami_signature_header(signing_secret, data, ts=sign_ts),
+            )
     req.add_header("User-Agent", "TwilioProxy/AMI-Voice-Streams/v1")
 
     try:

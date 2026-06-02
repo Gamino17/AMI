@@ -104,6 +104,12 @@ class Config:
         # por sesión (lo elige media.MediaBridge al bindear), así que no se
         # configura puerto fijo.
         self.rtp_host: str = os.environ.get("AMI_VOICE_BRIDGE_RTP_HOST", "ami_voice_bridge")
+        # Para resolver el signing_secret del MID via el endpoint interno de AMI
+        # (X-Telco-Key). El secreto NUNCA viaja por el dialplan.
+        self.ami_api_base: str = os.environ.get(
+            "AMI_API_URL", os.environ.get("AMI_PUBLIC_URL", "http://ami_api:8000")
+        ).rstrip("/")
+        self.telco_inbound_key: str = os.environ.get("AMI_TELCO_INBOUND_KEY", "")
 
 
 # Config global del proceso (se inicializa en main(); los tests la setean
@@ -269,8 +275,38 @@ async def ari_continue(channel_id: str) -> None:
 
 # ===================== WEBHOOK DISPATCH =====================
 
+async def fetch_signing_secret(mid: str) -> "str | None":
+    """Pide a AMI (endpoint interno, X-Telco-Key) el signing_secret del MID.
+
+    GET {ami_api_base}/v1/_telco/voice-config/{mid} con cabecera X-Telco-Key.
+    NO reutiliza _ari_request (eso manda Basic-auth de ARI, no X-Telco-Key, y
+    AMI respondería 401). Swallow de errores: si falla -> None -> el webhook
+    sale SIN firmar (la llamada NO se cae por esto). NUNCA loguea el secreto.
+    """
+    if not mid or not CONFIG.telco_inbound_key:
+        return None
+
+    def _blocking() -> "str | None":
+        url = (f"{CONFIG.ami_api_base}/v1/_telco/voice-config/"
+               f"{urllib.parse.quote(mid)}")
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("X-Telco-Key", CONFIG.telco_inbound_key)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                if r.status != 200:
+                    return None
+                obj = json.loads(r.read().decode("utf-8", "replace"))
+                return obj.get("signing_secret")
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+            return None
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _blocking)
+
+
 async def fetch_twiml(voice_url: str, call_dict: dict,
-                      mid_phone: str) -> "list[dict]":
+                      mid_phone: str,
+                      signing_secret: "str | None" = None) -> "list[dict]":
     """Despacha el webhook estilo Twilio al voice_url y devuelve las acciones.
 
     Reutiliza vs.twilio_voice_payload (arma CallSid/From/To/Direction/…) y
@@ -285,7 +321,8 @@ async def fetch_twiml(voice_url: str, call_dict: dict,
     status, body, actions = await loop.run_in_executor(
         None,
         lambda: vs.dispatch_voice_webhook(
-            voice_url, payload, "POST", CONFIG.webhook_timeout
+            voice_url, payload, "POST", CONFIG.webhook_timeout,
+            signing_secret=signing_secret,
         ),
     )
     if not (200 <= status < 300) or not actions:
@@ -296,8 +333,9 @@ async def fetch_twiml(voice_url: str, call_dict: dict,
         )
         return [{"verb": "hangup"}]
     log.info(
-        "fetch_twiml voice_url=%s status=%s -> %d acciones %s",
-        voice_url, status, len(actions), [a.get("verb") for a in actions],
+        "fetch_twiml voice_url=%s status=%s signed=%s -> %d acciones %s",
+        voice_url, status, bool(signing_secret), len(actions),
+        [a.get("verb") for a in actions],
     )
     return actions
 
@@ -441,6 +479,7 @@ async def _on_stasis_start(ev: dict) -> None:
     mid_phone = await ari_get_var(cid, "MID_PHONE")
     call_id = await ari_get_var(cid, "AMI_CALL_ID")
     frm = await ari_get_var(cid, "AMI_FROM")
+    mid = await ari_get_var(cid, "AMI_MID")
 
     if not voice_url:
         # Nada que hacer en Stasis: devolvemos el channel al dialplan.
@@ -460,6 +499,7 @@ async def _on_stasis_start(ev: dict) -> None:
     }
     SESSIONS[cid] = {
         "call_id": call_id or cid,
+        "mid": mid,
         "mid_phone": mid_phone,
         "voice_url": voice_url,
         "from": call_dict["from"],
@@ -467,10 +507,13 @@ async def _on_stasis_start(ev: dict) -> None:
         "media": None,
     }
     log.info(
-        "StasisStart channel=%s call_id=%s from=%s to=%s voice_url=%s",
-        cid, call_dict["id"], call_dict["from"], call_dict["to"], voice_url,
+        "StasisStart channel=%s call_id=%s mid=%s from=%s to=%s voice_url=%s",
+        cid, call_dict["id"], mid, call_dict["from"], call_dict["to"], voice_url,
     )
-    actions = await fetch_twiml(voice_url, call_dict, mid_phone or "")
+    # El signing_secret se resuelve maquina-a-maquina (endpoint interno
+    # X-Telco-Key); NO viaja por el dialplan. Sin mid o si falla -> sin firmar.
+    signing_secret = await fetch_signing_secret(mid) if mid else None
+    actions = await fetch_twiml(voice_url, call_dict, mid_phone or "", signing_secret)
     await run_actions(cid, actions, SESSIONS[cid])
 
 

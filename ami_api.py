@@ -607,6 +607,14 @@ def check_kyc_admin_csrf(handler) -> bool:
 def _hash_token(plain): return hashlib.sha256(plain.encode("utf-8")).hexdigest()
 
 
+def _redact_secret(s):
+    """Prefijo+sufijo de un secreto (p.ej. 'amiwhsec_d0b5...ec4f') para GET y
+    copias publicas. NUNCA devuelve el secreto entero."""
+    if not s:
+        return None
+    return (s[:13] + "..." + s[-4:]) if len(s) > 20 else "set"
+
+
 def mint_agent_token(mid, customer_id):
     """Genera un agent_token scoped al MID. Devuelve el plano una vez."""
     plain = "amiagt_live_" + secrets.token_hex(32)
@@ -6911,6 +6919,24 @@ class Handler(BaseHTTPRequestHandler):
                 return response(self, 404, {"error": "call_not_found"})
             return response(self, 200, call)
 
+        # Endpoint INTERNO para el bridge: voice_url + signing_secret de un MID.
+        # Auth: X-Telco-Key (el partner/bridge, NO el customer). Va ANTES del gate
+        # de customer-auth. UNICO sitio que devuelve el signing_secret en claro,
+        # maquina-a-maquina; nunca al customer ni en logs.
+        m = re.match(r"^/v1/_telco/voice-config/([^/]+)$", p)
+        if m:
+            if not TELCO_INBOUND_KEY:
+                return response(self, 503, {"error": "telco_inbound_disabled"})
+            if not secrets.compare_digest(self.headers.get("X-Telco-Key", ""), TELCO_INBOUND_KEY):
+                return response(self, 401, {"error": "invalid_telco_key"})
+            identity = STATE["mobile_identities"].get(m.group(1))
+            vc = identity.get("voice_config") if identity else None
+            if not isinstance(vc, dict) or not vc.get("voice_url"):
+                return response(self, 404, {"error": "voice_config_not_found"})
+            return response(self, 200, {"mid": m.group(1),
+                                        "voice_url": vc["voice_url"],
+                                        "signing_secret": vc.get("signing_secret")})
+
         if not is_public("GET", p) and not check_auth(self):
             return response(self, 401, {"error": "unauthorized"})
         # Idioma global: el detector se usa tanto para las páginas con chrome
@@ -7194,8 +7220,11 @@ class Handler(BaseHTTPRequestHandler):
             identity = STATE["mobile_identities"].get(m.group(1))
             if not identity or not _scoped(identity, _request_account_id(self)):
                 return response(self, 404, {"error": "mobile_identity_not_found"})
-            return response(self, 200, {"mid": m.group(1),
-                                        "voice_config": identity.get("voice_config")})
+            vc = identity.get("voice_config")
+            if isinstance(vc, dict) and vc.get("signing_secret"):
+                vc = dict(vc)
+                vc["signing_secret"] = _redact_secret(vc.get("signing_secret"))
+            return response(self, 200, {"mid": m.group(1), "voice_config": vc})
 
         # Admin: listar customer-accounts (auth: AMI_ADMIN_KEY).
         if p == "/v1/admin/customers":
@@ -7243,6 +7272,13 @@ class Handler(BaseHTTPRequestHandler):
             # con el del request, devolvemos 404 (no 403 para no filtrar existencia).
             if not _scoped(obj, _request_account_id(self)):
                 return response(self, 404, {"error": "not_found", "id": m.group(2)})
+            # Redactar el signing_secret del voice_config (nunca en claro en GET;
+            # solo se muestra una vez en activate / voice-config-set).
+            if isinstance(obj.get("voice_config"), dict) and obj["voice_config"].get("signing_secret"):
+                obj = dict(obj)
+                vc = dict(obj["voice_config"])
+                vc["signing_secret"] = _redact_secret(vc.get("signing_secret"))
+                obj["voice_config"] = vc
             return response(self, 200, obj)
         return response(self, 404, {"error": "unknown_route", "path": p})
 
@@ -8156,16 +8192,32 @@ class Handler(BaseHTTPRequestHandler):
                 return response(self, 400, {"error": "invalid_voice_url",
                     "detail": "expected https:// URL "
                               "(set AMI_VOICE_ALLOW_HTTP=1 to allow http:// in dev)"})
+            # signing_secret X-AMI-Signature: explicito (bootstrap) o auto-emitido.
+            ss = data.get("signing_secret")
+            if ss in (None, ""):
+                ss = ami_voice_streams.new_signing_secret()
+            elif not str(ss).startswith("amiwhsec_"):
+                return response(self, 400, {"error": "invalid_signing_secret",
+                    "detail": "expected 'amiwhsec_' prefix"})
             cfg = ami_voice_streams.new_voice_config(
                 vu,
                 status_callback_url=data.get("status_callback_url"),
                 voice_method=data.get("voice_method", "POST"),
                 status_callback_method=data.get("status_callback_method", "POST"),
+                signing_secret=ss,
             )
             identity["voice_config"] = cfg
             event("mid_voice_config_updated", "mobile_identity", mid,
                   {"voice_config_id": cfg["id"], "voice_url": cfg["voice_url"]})
-            return response(self, 200, {"mid": mid, "voice_config": cfg})
+            cfg_pub = dict(cfg)
+            cfg_pub["signing_secret"] = _redact_secret(cfg["signing_secret"])
+            return response(self, 200, {
+                "mid": mid, "voice_config": cfg_pub,
+                "signing_secret": cfg["signing_secret"],
+                "signing_secret_hint": "Guarda este secreto: solo se muestra una "
+                "vez. Configuralo como AMI_WEBHOOK_SECRET en tu verificador. Rota "
+                "con POST /v1/mobile-identities/" + mid + "/rotate-signing-secret.",
+            })
 
         # Activar MobileIdentity (telco mock = lo único realmente simulado)
         # Rotación de agent_token. Auth: API key del customer (Nivel 1).
@@ -8189,6 +8241,34 @@ class Handler(BaseHTTPRequestHandler):
                 "rotated_at": now(),
                 "agent_token_hint": "El token anterior queda invalidado al instante. "
                                     "Actualiza AMI_AGENT_TOKEN del agente con este valor.",
+            })
+
+        # Rotar el signing_secret X-AMI-Signature de un MID. Auth: customer key.
+        m = re.match(r"^/v1/mobile-identities/([^/]+)/rotate-signing-secret$", p)
+        if m:
+            mid = m.group(1)
+            identity = STATE["mobile_identities"].get(mid)
+            if not identity or not _scoped(identity, _request_account_id(self)):
+                return response(self, 404, {"error": "mobile_identity_not_found"})
+            vc = identity.get("voice_config")
+            if not isinstance(vc, dict) or not vc.get("voice_url"):
+                return response(self, 409, {"error": "voice_config_not_set"})
+            new_ss = data.get("signing_secret")
+            if new_ss in (None, ""):
+                new_ss = ami_voice_streams.new_signing_secret()
+            elif not str(new_ss).startswith("amiwhsec_"):
+                return response(self, 400, {"error": "invalid_signing_secret",
+                    "detail": "expected 'amiwhsec_' prefix"})
+            vc["signing_secret"] = new_ss
+            vc["updated_at"] = now()
+            event("signing_secret_rotated", "mobile_identity", mid,
+                  {"voice_config_id": vc.get("id")})
+            return response(self, 200, {
+                "mid": mid,
+                "signing_secret": new_ss,
+                "rotated_at": now(),
+                "signing_secret_hint": "El secreto anterior queda invalidado. "
+                "Actualiza AMI_WEBHOOK_SECRET en tu verificador con este valor.",
             })
 
         if p == "/v1/mobile-identities/activate":
@@ -8217,6 +8297,7 @@ class Handler(BaseHTTPRequestHandler):
             # agente entrega su Voice URL al provisionar y el número nace ya
             # cableado a su webhook). Si no viene, se puede setear/cambiar luego
             # con POST /v1/mobile-identities/{mid}/voice-config.
+            issued_signing_secret = None
             voice_url = data.get("voice_url")
             if voice_url not in (None, ""):
                 vu = str(voice_url).strip()
@@ -8226,11 +8307,20 @@ class Handler(BaseHTTPRequestHandler):
                     return response(self, 400, {"error": "invalid_voice_url",
                         "detail": "expected https:// URL "
                                   "(set AMI_VOICE_ALLOW_HTTP=1 to allow http:// in dev)"})
+                # signing_secret X-AMI-Signature: explicito (bootstrap) o auto-emitido.
+                ss = data.get("signing_secret")
+                if ss in (None, ""):
+                    ss = ami_voice_streams.new_signing_secret()
+                elif not str(ss).startswith("amiwhsec_"):
+                    return response(self, 400, {"error": "invalid_signing_secret",
+                        "detail": "expected 'amiwhsec_' prefix"})
+                issued_signing_secret = ss
                 identity["voice_config"] = ami_voice_streams.new_voice_config(
                     vu,
                     status_callback_url=data.get("status_callback_url"),
                     voice_method=data.get("voice_method", "POST"),
                     status_callback_method=data.get("status_callback_method", "POST"),
+                    signing_secret=ss,
                 )
             STATE["mobile_identities"][mid] = identity
             # Audit log mínimo (sin phone_number ni QR url completa).
@@ -8256,6 +8346,19 @@ class Handler(BaseHTTPRequestHandler):
                 "Inyéctalo al agente como AMI_AGENT_TOKEN. "
                 "Si se filtra, rota con POST /v1/mobile-identities/" + mid + "/rotate-token."
             )
+            # El voice_config del record lleva el signing_secret en claro: en la
+            # respuesta lo REDACTAMOS y devolvemos el secreto en claro UNA VEZ aparte.
+            if isinstance(resp_body.get("voice_config"), dict):
+                vc = dict(resp_body["voice_config"])
+                vc["signing_secret"] = _redact_secret(vc.get("signing_secret"))
+                resp_body["voice_config"] = vc
+            if issued_signing_secret:
+                resp_body["signing_secret"] = issued_signing_secret
+                resp_body["signing_secret_hint"] = (
+                    "Guarda este secreto: solo se muestra una vez. Configuralo como "
+                    "AMI_WEBHOOK_SECRET en tu verificador. Rota con POST "
+                    "/v1/mobile-identities/" + mid + "/rotate-signing-secret."
+                )
             return response(self, 201, resp_body)
 
         return response(self, 404, {"error": "unknown_route", "path": p})

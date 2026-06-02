@@ -432,6 +432,7 @@ def test_handle_stasisstart_con_voice_url_despacha(monkeypatch, ari_stubs):
         "MID_PHONE": "+573336033869",
         "AMI_CALL_ID": "call_real_777",
         "AMI_FROM": "+34680628414",
+        "AMI_MID": "mid_real_1",
     }
 
     async def _get_var(channel_id, var):
@@ -439,14 +440,20 @@ def test_handle_stasisstart_con_voice_url_despacha(monkeypatch, ari_stubs):
 
     captured_fetch = {}
 
-    async def _fetch(voice_url, call_dict, mid_phone):
+    async def _fetch(voice_url, call_dict, mid_phone, signing_secret=None):
         captured_fetch["voice_url"] = voice_url
         captured_fetch["call_dict"] = call_dict
         captured_fetch["mid_phone"] = mid_phone
+        captured_fetch["signing_secret"] = signing_secret
         return [{"verb": "hangup"}]
+
+    async def _fetch_secret(mid):
+        captured_fetch["secret_mid"] = mid
+        return "amiwhsec_" + "a" * 64
 
     monkeypatch.setattr(bridge, "ari_get_var", _get_var, raising=True)
     monkeypatch.setattr(bridge, "fetch_twiml", _fetch, raising=True)
+    monkeypatch.setattr(bridge, "fetch_signing_secret", _fetch_secret, raising=True)
 
     ev = {
         "type": "StasisStart",
@@ -461,6 +468,9 @@ def test_handle_stasisstart_con_voice_url_despacha(monkeypatch, ari_stubs):
     assert captured_fetch["call_dict"]["id"] == "call_real_777"
     assert captured_fetch["call_dict"]["from"] == "+34680628414"
     assert captured_fetch["mid_phone"] == "+573336033869"
+    # El bridge resolvió el signing_secret por AMI_MID y lo pasó a fetch_twiml.
+    assert captured_fetch["secret_mid"] == "mid_real_1"
+    assert captured_fetch["signing_secret"] == "amiwhsec_" + "a" * 64
     # Ejecutó la acción hangup devuelta por el webhook.
     assert ari_stubs["hangup"].count == 1
 
