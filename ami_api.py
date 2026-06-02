@@ -892,8 +892,12 @@ TELCO_INBOUND_KEY = os.environ.get("AMI_TELCO_INBOUND_KEY") or None
 
 CALL_TERMINAL = {"completed", "failed", "no_answer", "busy", "cancelled"}
 CALL_TRANSITIONS = {
-    "initiated":   ["ringing", "failed", "cancelled"],
-    "ringing":     ["in_progress", "no_answer", "busy", "failed", "cancelled"],
+    # `in_progress` desde `initiated` aplica cuando el dialplan/SBC reporta
+    # answer directo sin ringing visible (early media, OpenAI Realtime que
+    # contesta inmediato, etc.). `completed` desde `initiated` aplica si el
+    # Originate falla antes de ringing (ej. CHANUNAVAIL inmediato).
+    "initiated":   ["ringing", "in_progress", "no_answer", "busy", "completed", "failed", "cancelled"],
+    "ringing":     ["in_progress", "no_answer", "busy", "completed", "failed", "cancelled"],
     "in_progress": ["completed", "failed"],
 }
 
@@ -1064,10 +1068,21 @@ def route_call_inbound(from_raw, to_raw, telco_ref=None):
 
 
 def update_call_status(call_id, new_status, **patch):
-    """Webhook del partner: cambia el estado de una llamada según señalización real."""
+    """Webhook del partner: cambia el estado de una llamada según señalización real.
+
+    Idempotente: si el estado nuevo == estado actual, devuelve 200 sin
+    re-procesar. Útil porque el dialplan puede mandar el mismo callback
+    varias veces (h handler + Hangup app) y no queremos errores espurios.
+    """
     call = STATE["calls"].get(call_id)
     if not call:
         return 404, {"error": "call_not_found"}
+    if call.get("status") == new_status:
+        # idempotente — el callback se repitió, dejamos pasar.
+        for k, v in patch.items():
+            if v is not None and not call.get(k):
+                call[k] = v
+        return 200, call
     try:
         transition_call(call, new_status, **patch)
     except ValueError as e:

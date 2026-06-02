@@ -335,7 +335,9 @@ def test_telco_status_webhook_updates_call(client, anon_client, active_identity,
 
 
 def test_telco_status_invalid_transition_is_409(anon_client, active_identity, telco_key, client):
-    """No se puede ir de 'initiated' a 'completed' directo."""
+    """Transición ahora más permisiva: initiated→completed se acepta
+    (caso CHANUNAVAIL inmediato en saliente). Invalido sigue siendo
+    completed→ringing (volver atrás en el ciclo de vida)."""
     mid = active_identity["mid"]
     phone = active_identity["identity"]["phone_number"]
     client.post(f"/v1/mobile-identities/{mid}/inbound-config",
@@ -347,10 +349,19 @@ def test_telco_status_invalid_transition_is_409(anon_client, active_identity, te
     )
     call_id = r.json()["call_id"]
 
+    # initiated → completed: AHORA permitida (fail-fast outbound).
     r = anon_client.post(
         f"/v1/_telco/calls/{call_id}/status",
         headers={"X-Telco-Key": telco_key},
         json={"status": "completed"},
+    )
+    assert r.status_code == 200
+
+    # completed → ringing: sigue inválido (no se puede revivir).
+    r = anon_client.post(
+        f"/v1/_telco/calls/{call_id}/status",
+        headers={"X-Telco-Key": telco_key},
+        json={"status": "ringing"},
     )
     assert r.status_code == 409
 

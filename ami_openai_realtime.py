@@ -1,5 +1,12 @@
 """Webhook + accept-call para OpenAI Realtime con SIP.
 
+OpenAI sigue Standard Webhooks spec (https://standardwebhooks.com):
+- Headers: webhook-id, webhook-timestamp, webhook-signature.
+- signature header format: "v1,<base64_hmac>".
+- secret format: "whsec_<base64_secret>" — descartar el prefijo y decodificar.
+- payload firmado: "{webhook_id}.{webhook_timestamp}.{body}".
+- HMAC-SHA256.
+
 Flujo:
 
   1. Asterisk recibe INVITE entrante del partner CO con DID 3336033869.
@@ -32,6 +39,7 @@ Seguridad:
   y emite warning. NUNCA dejar así en producción.
 """
 from __future__ import annotations
+import base64
 import hashlib
 import hmac
 import json
@@ -58,11 +66,14 @@ REPLAY_WINDOW_SECONDS = 5 * 60   # rechazar webhooks > 5 min de antigüedad
 
 def verify_signature(headers: dict, raw_body: bytes,
                      secret: str | None) -> tuple[bool, str | None]:
-    """Verifica el HMAC del webhook de OpenAI.
+    """Verifica firma de webhook OpenAI (Standard Webhooks spec).
 
-    OpenAI firma sobre `{webhook_id}.{webhook_timestamp}.{body}` con
-    HMAC-SHA256, valor en hex. El header `webhook-signature` puede tener
-    formato `v1,<hex>` (similar a Stripe) o solo `<hex>` — aceptamos ambos.
+    - signature header format: "v1,<base64_hmac>" (puede tener múltiples
+      separadas por espacio para rotación: "v1,sig1 v1,sig2").
+    - secret format: "whsec_<base64_key>" — descartar el prefijo y
+      decodificar base64 para obtener bytes raw.
+    - payload firmado: f"{webhook_id}.{webhook_timestamp}.{body}".
+    - HMAC-SHA256, comparado en base64.
 
     Si `secret` is None (no configurado), devolvemos (True, "dev_no_secret")
     como modo desarrollo. Documentado arriba.
@@ -85,32 +96,38 @@ def verify_signature(headers: dict, raw_body: bytes,
     if abs(time.time() - ts) > REPLAY_WINDOW_SECONDS:
         return False, "timestamp_outside_window"
 
-    # Acepta tanto "v1,<hex>" como "<hex>" pelado, y posibles múltiples
-    # firmas separadas por coma (rotación).
+    # Decodifica la key: "whsec_<base64>" → bytes raw.
+    sec = secret
+    if sec.startswith("whsec_"):
+        sec = sec[len("whsec_"):]
+    try:
+        key_bytes = base64.b64decode(sec)
+    except Exception:
+        # Si no decodifica como base64, fallback a usar el secret crudo.
+        key_bytes = secret.encode("utf-8")
+
+    # Extrae candidatos: una o más "v1,<base64>" separadas por espacio.
     candidates: list[str] = []
     for part in wh_sig.split():
-        for tok in part.split(","):
-            tok = tok.strip()
-            if tok.startswith("v1="):
-                tok = tok[3:]
-            elif tok == "v1":
-                continue
-            if tok:
-                candidates.append(tok)
-
+        if part.startswith("v1,"):
+            candidates.append(part[3:])
+        elif "," in part and part.split(",", 1)[0].startswith("v"):
+            candidates.append(part.split(",", 1)[1])
+        else:
+            candidates.append(part)
     if not candidates:
         return False, "no_candidate_signatures"
 
-    signed_payload = f"{wh_id}.{wh_ts}.{raw_body.decode('utf-8', 'replace')}"
-    expected = hmac.new(secret.encode("utf-8"),
-                        signed_payload.encode("utf-8"),
-                        hashlib.sha256).hexdigest()
+    signed_payload = f"{wh_id}.{wh_ts}.".encode("utf-8") + raw_body
+    expected = base64.b64encode(
+        hmac.new(key_bytes, signed_payload, hashlib.sha256).digest()
+    ).decode("ascii")
 
     for cand in candidates:
         try:
             if hmac.compare_digest(cand, expected):
                 return True, "ok"
-        except TypeError:
+        except (TypeError, ValueError):
             continue
     return False, "signature_mismatch"
 
@@ -193,14 +210,16 @@ def handle_webhook(headers: dict, raw_body: bytes) -> tuple[int, dict]:
     - Otros types → log y 200 (no romper la entrega).
     """
     secret = os.environ.get("OPENAI_WEBHOOK_SECRET") or None
+    strict = os.environ.get("OPENAI_WEBHOOK_STRICT") == "1"
     ok_sig, reason = verify_signature(headers, raw_body, secret)
-    # Log siempre el estado de la firma para debug — sin rechazar.
     print(f"[openai_realtime] webhook received · sig_ok={ok_sig} · reason={reason} · "
-          f"body_len={len(raw_body)} · ct={headers.get('content-type','')}",
-          file=sys.stderr)
+          f"strict={strict} · body_len={len(raw_body)} · "
+          f"ct={headers.get('content-type','')}", file=sys.stderr)
     if not ok_sig:
-        print(f"[openai_realtime] WARN: sig mismatch (reason={reason}) — accepting anyway",
-              file=sys.stderr)
+        if strict:
+            return 401, {"error": "invalid_signature", "reason": reason}
+        print(f"[openai_realtime] WARN: sig mismatch (reason={reason}) — accepting "
+              f"anyway (OPENAI_WEBHOOK_STRICT=0)", file=sys.stderr)
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
