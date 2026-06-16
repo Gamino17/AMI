@@ -76,6 +76,45 @@ def test_kyc_initiate_404_for_unknown_sim_request(client):
     assert r.status_code == 404
 
 
+# ─────────────────────────── status (GET) ───────────────────────────
+
+def test_kyc_status_reflects_pending_after_initiate(client, accepted_offer_with_customer):
+    sim_id = accepted_offer_with_customer["sim_request_id"]
+    init = client.post(f"/v1/sim-requests/{sim_id}/kyc/initiate").json()
+    r = client.get(f"/v1/sim-requests/{sim_id}/kyc")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "pending"
+    assert body["id"] == init["kyc_id"]
+    assert "/kyc/" in body["verification_url"]
+
+
+def test_kyc_status_404_when_not_initiated(client, accepted_offer_with_customer):
+    sim_id = accepted_offer_with_customer["sim_request_id"]
+    r = client.get(f"/v1/sim-requests/{sim_id}/kyc")
+    assert r.status_code == 404
+    assert r.json()["error"] == "kyc_not_initiated"
+
+
+def test_kyc_status_404_for_unknown_sim_request(client):
+    r = client.get("/v1/sim-requests/simreq_doesnotexist/kyc")
+    assert r.status_code == 404
+
+
+def test_kyc_status_reflects_verified_after_admin_verify(
+        client, anon_client, server_url, accepted_offer_with_customer, admin_headers):
+    import httpx
+    sim_id = accepted_offer_with_customer["sim_request_id"]
+    token = _token_from(client, sim_id)
+    anon_client.post(f"/kyc/{token}/submit", json={"dni_front_b64": _TINY_JPEG_B64})
+    with httpx.Client(base_url=server_url, headers=admin_headers, timeout=5.0) as admin:
+        kyc_id = admin.get("/v1/admin/kyc").json()["kycs"][0]["id"]
+        admin.post(f"/v1/admin/kyc/{kyc_id}/verify", json={"reviewer": "daniel"})
+    r = client.get(f"/v1/sim-requests/{sim_id}/kyc")
+    assert r.status_code == 200
+    assert r.json()["status"] == "verified"
+
+
 # ─────────────────────────── public form ───────────────────────────
 
 def test_kyc_public_form_loads(client, anon_client, accepted_offer_with_customer):

@@ -2106,6 +2106,8 @@ def _tools_for_landing():
         ("ami.request_sim_offer",       "Crea una solicitud de número y devuelve la oferta inmediata desde nuestra plataforma."),
         ("ami.accept_offer",            "Acepta una oferta antes de generar contrato."),
         ("ami.submit_customer_data",    "Envía los datos legales/fiscales del cliente y los vincula a la solicitud."),
+        ("ami.initiate_kyc",            "Dispara la verificación de identidad (KYC) del representante legal y devuelve la URL pública de verificación."),
+        ("ami.get_kyc_status",          "Consulta el estado del KYC de la solicitud (pending · submitted · verified · rejected)."),
         ("ami.create_contract",         "Genera el contrato y devuelve la URL de firma."),
         ("ami.get_contract_status",     "Consulta el estado actual de un contrato."),
         ("ami.confirm_signature_status","Comprueba si el contrato ya está firmado."),
@@ -2145,6 +2147,8 @@ def _endpoints_for_landing():
         ("POST", "/v1/sim-requests/{id}/cancel",            "Cancela una SIMRequest."),
         ("POST", "/v1/sim-requests/{id}/customer-data",     "Vincula datos del cliente."),
         ("POST", "/v1/offers/{id}/accept",                  "Acepta una oferta."),
+        ("POST", "/v1/sim-requests/{id}/kyc/initiate",      "Dispara el KYC del rep. legal (devuelve verification_url)."),
+        ("GET",  "/v1/sim-requests/{id}/kyc",               "Estado del KYC de la solicitud."),
         ("POST", "/v1/contracts",                           "Crea contrato y signature_url."),
         ("GET",  "/v1/contracts/{id}",                      "Consulta el contrato."),
         ("GET",  "/v1/sign/{id}",                           "Página HTML de firma (pública)."),
@@ -6699,6 +6703,7 @@ def render_openapi():
             "/v1/customers/{id}":                         {"get":  {"summary": "Obtener cliente", "tags": ["Contratación"], "responses": {"200": {"description": "OK"}}}},
             "/v1/contracts":                              {"post": {"summary": "Crear contrato + signature_url", "tags": ["Contratación"], "responses": {"201": {"description": "Created"}, "409": {"description": "kyc_required (si AMI_KYC_REQUIRED=1)"}}}},
             "/v1/sim-requests/{id}/kyc/initiate":         {"post": {"summary": "Disparar verificación humana (KYC) del rep. legal", "tags": ["Contratación · KYC"], "responses": {"201": {"description": "Created (token + verification_url)"}, "200": {"description": "Existing KYC reused"}, "409": {"description": "customer_data_missing"}}}},
+            "/v1/sim-requests/{id}/kyc":                  {"get":  {"summary": "Estado del KYC vinculado a la sim_request (status + verification_url)", "tags": ["Contratación · KYC"], "responses": {"200": {"description": "OK (kyc_summary)"}, "404": {"description": "kyc_not_initiated / sim_request_not_found"}}}},
             "/kyc/{token}":                               {"get":  {"summary": "Página pública para que el humano suba DNI + selfie", "tags": ["Contratación · KYC"], "security": [], "responses": {"200": {"description": "HTML"}, "404": {"description": "kyc_not_found"}}}},
             "/kyc/{token}/submit":                        {"post": {"summary": "Recibe imágenes base64 desde el form público", "tags": ["Contratación · KYC"], "security": [], "responses": {"200": {"description": "Submitted"}, "400": {"description": "dni_front_required / *_too_large / *_invalid_format"}, "409": {"description": "kyc_already_submitted"}}}},
             "/v1/admin/kyc":                              {"get":  {"summary": "Admin: listar KYCs (auth: AMI_ADMIN_KEY)", "tags": ["Admin · KYC"], "responses": {"200": {"description": "OK"}, "401": {"description": "unauthorized_admin"}}}},
@@ -7276,6 +7281,28 @@ class Handler(BaseHTTPRequestHandler):
             whs = [ami_webhooks.webhook_summary(w)
                    for w in STATE["webhooks"].values() if w.get("account_id") == acc]
             return response(self, 200, {"webhooks": whs, "count": len(whs)})
+
+        # KYC status (customer-scoped): el agente consulta el estado del KYC
+        # vinculado a una sim_request para saber cuándo puede generar contrato
+        # (status == "verified"). Complementa a kyc/initiate: sin esto el agente
+        # tendría que sondear create_contract (que mintaría contratos duplicados).
+        m = re.match(r"^/v1/sim-requests/([^/]+)/kyc$", p)
+        if m:
+            req = STATE["sim_requests"].get(m.group(1))
+            if not req or not _scoped(req, _request_account_id(self)):
+                return response(self, 404, {"error": "sim_request_not_found"})
+            kyc = next((k for k in STATE["kyc_verifications"].values()
+                        if k.get("sim_request_id") == req["id"]), None)
+            if not kyc:
+                return response(self, 404, {"error": "kyc_not_initiated",
+                    "detail": "POST /v1/sim-requests/{id}/kyc/initiate primero"})
+            # Marcar expirado on-read si procede (coherente con la página pública).
+            if kyc.get("status") == "pending" and ami_kyc.is_expired(kyc):
+                kyc["status"] = "expired"
+            base = (os.environ.get("AMI_PUBLIC_URL") or "http://localhost:8000").rstrip("/")
+            out = ami_kyc.kyc_summary(kyc)
+            out["verification_url"] = f"{base}/kyc/{kyc['token']}"
+            return response(self, 200, out)
 
         m = re.match(r"^/v1/(sim-requests|offers|customers|contracts|mobile-identities)/([^/]+)$", p)
         if m:

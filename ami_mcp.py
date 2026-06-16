@@ -77,9 +77,13 @@ mcp = FastMCP(
     instructions=(
         "AMI v1 — Agent Mobile Identity Protocol. Permite a un agente solicitar, "
         "contratar y activar una identidad móvil (SIM/eSIM/número). Flujo: "
-        "request_sim_offer → accept_offer → submit_customer_data → create_contract "
-        "→ (firmar en signature_url) → activate_sim_identity. La SIM física es lo "
-        "único simulado; el resto del flujo es real."
+        "request_sim_offer → accept_offer → submit_customer_data → initiate_kyc "
+        "→ (el rep. legal verifica su identidad en verification_url) → create_contract "
+        "→ (firmar en signature_url) → activate_sim_identity. El paso KYC es "
+        "obligatorio antes del contrato: si create_contract responde "
+        "'kyc_required'/'kyc_not_verified', llama a initiate_kyc y sondea "
+        "get_kyc_status hasta 'verified'. La SIM física es lo único simulado; el "
+        "resto del flujo es real."
     ),
 )
 
@@ -139,9 +143,32 @@ async def submit_customer_data(
     })
 
 
+@mcp.tool(name="ami.initiate_kyc",
+          description="Dispara la verificación de identidad (KYC) del representante "
+                      "legal del cliente. Paso obligatorio entre submit_customer_data "
+                      "y create_contract cuando el backend exige KYC. Devuelve "
+                      "verification_url: la página pública donde el humano sube su "
+                      "documento + selfie. Pásasela al cliente por email/SMS/WhatsApp. "
+                      "Idempotente: si ya hay un KYC en curso para la sim_request, "
+                      "devuelve el existente.")
+async def initiate_kyc(sim_request_id: str) -> dict:
+    return await _post(f"/v1/sim-requests/{sim_request_id}/kyc/initiate")
+
+
+@mcp.tool(name="ami.get_kyc_status",
+          description="Consulta el estado del KYC vinculado a una sim_request: "
+                      "pending (esperando que el humano suba docs) · submitted/in_review "
+                      "(en revisión) · verified (ya se puede crear el contrato) · "
+                      "rejected · expired. Úsala para sondear antes de reintentar "
+                      "create_contract.")
+async def get_kyc_status(sim_request_id: str) -> dict:
+    return await _get(f"/v1/sim-requests/{sim_request_id}/kyc")
+
+
 @mcp.tool(name="ami.create_contract",
           description="Genera el contrato vinculado a una oferta y un cliente. "
-                      "Devuelve signature_url donde el firmante debe aceptar.")
+                      "Devuelve signature_url donde el firmante debe aceptar. "
+                      "Requiere KYC verified si el backend lo exige (ver initiate_kyc).")
 async def create_contract(offer_id: str, customer_id: str) -> dict:
     return await _post("/v1/contracts", {"offer_id": offer_id, "customer_id": customer_id})
 
