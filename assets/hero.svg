@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" fill="none" role="img" aria-label="AMI — Agent Mobile Identity Protocol">
+  <title>AMI — Agent Mobile Identity Protocol</title>
+
+  <defs>
+    <!-- Base ambient background -->
+    <radialGradient id="bgGlow" cx="50%" cy="38%" r="75%">
+      <stop offset="0%" stop-color="#12111c"/>
+      <stop offset="55%" stop-color="#0a0a0f"/>
+      <stop offset="100%" stop-color="#08080c"/>
+    </radialGradient>
+
+    <!-- Violet halo -->
+    <radialGradient id="violetHalo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#8b6cff" stop-opacity="0.55"/>
+      <stop offset="45%" stop-color="#8b6cff" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#8b6cff" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Cyan halo -->
+    <radialGradient id="cyanHalo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#5dd1ff" stop-opacity="0.50"/>
+      <stop offset="45%" stop-color="#5dd1ff" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#5dd1ff" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Subtle center lift behind wordmark -->
+    <radialGradient id="centerLift" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Wordmark gradient: cyan -> white -> violet -->
+    <linearGradient id="wordmark" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#e9f6ff"/>
+      <stop offset="50%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f1ecff"/>
+    </linearGradient>
+
+    <!-- Accent dot gradient -->
+    <linearGradient id="accentDot" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#5dd1ff"/>
+      <stop offset="100%" stop-color="#8b6cff"/>
+    </linearGradient>
+
+    <!-- Node stroke gradient -->
+    <linearGradient id="netStroke" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#5dd1ff"/>
+      <stop offset="100%" stop-color="#8b6cff"/>
+    </linearGradient>
+
+    <!-- Soft glow filter for wordmark -->
+    <filter id="softGlow" x="-30%" y="-40%" width="160%" height="180%">
+      <feGaussianBlur stdDeviation="9" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Fine grain to avoid banding -->
+    <filter id="grain">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="7" stitchTiles="stitch" result="noise"/>
+      <feColorMatrix in="noise" type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.5 0"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="#08080c"/>
+  <rect width="1280" height="640" fill="url(#bgGlow)"/>
+
+  <!-- Ambient halos -->
+  <g opacity="0.9">
+    <ellipse cx="300" cy="140" rx="620" ry="520" fill="url(#violetHalo)"/>
+    <ellipse cx="1010" cy="540" rx="640" ry="540" fill="url(#cyanHalo)"/>
+    <ellipse cx="960" cy="90" rx="420" ry="360" fill="url(#cyanHalo)" opacity="0.6"/>
+    <ellipse cx="220" cy="560" rx="460" ry="380" fill="url(#violetHalo)" opacity="0.55"/>
+  </g>
+
+  <!-- Subtle geometric network motif -->
+  <g opacity="0.5" stroke="url(#netStroke)" stroke-width="1" fill="none">
+    <line x1="150" y1="120" x2="330" y2="230"/>
+    <line x1="330" y1="230" x2="470" y2="115"/>
+    <line x1="330" y1="230" x2="250" y2="420"/>
+    <line x1="1130" y1="500" x2="960" y2="410"/>
+    <line x1="960" y1="410" x2="1050" y2="235"/>
+    <line x1="960" y1="410" x2="820" y2="520"/>
+    <line x1="1050" y1="235" x2="1150" y2="150"/>
+  </g>
+  <g fill="#5dd1ff">
+    <circle cx="150" cy="120" r="3.5" opacity="0.85"/>
+    <circle cx="330" cy="230" r="4.5" fill="#8b6cff" opacity="0.9"/>
+    <circle cx="470" cy="115" r="3" opacity="0.7"/>
+    <circle cx="250" cy="420" r="3" fill="#8b6cff" opacity="0.7"/>
+    <circle cx="1130" cy="500" r="3.5" opacity="0.8"/>
+    <circle cx="960" cy="410" r="4.5" fill="#8b6cff" opacity="0.9"/>
+    <circle cx="1050" cy="235" r="3.5" opacity="0.8"/>
+    <circle cx="820" cy="520" r="3" opacity="0.6"/>
+    <circle cx="1150" cy="150" r="3" fill="#8b6cff" opacity="0.65"/>
+  </g>
+
+  <!-- Center lift behind wordmark -->
+  <ellipse cx="640" cy="280" rx="520" ry="240" fill="url(#centerLift)"/>
+
+  <!-- Wordmark AMI -->
+  <g filter="url(#softGlow)">
+    <text x="640" y="315"
+          text-anchor="middle"
+          font-family="'Inter',-apple-system,'Segoe UI',sans-serif"
+          font-size="290"
+          font-weight="800"
+          letter-spacing="-8"
+          fill="url(#wordmark)">AMI</text>
+  </g>
+
+  <!-- Accent dot -->
+  <circle cx="905" cy="288" r="22" fill="url(#accentDot)"/>
+  <circle cx="905" cy="288" r="22" fill="url(#accentDot)" opacity="0.55" filter="url(#softGlow)"/>
+
+  <!-- Tagline -->
+  <text x="640" y="430"
+        text-anchor="middle"
+        font-family="'Inter',-apple-system,'Segoe UI',sans-serif"
+        font-size="42"
+        font-weight="600"
+        letter-spacing="6"
+        fill="#eef1f7">Agent Mobile Identity Protocol</text>
+
+  <!-- Fine subtitle -->
+  <text x="640" y="482"
+        text-anchor="middle"
+        font-family="'Inter',-apple-system,'Segoe UI',sans-serif"
+        font-size="21"
+        font-weight="400"
+        letter-spacing="3"
+        fill="#9aa3b8">Identity + permissions for AI agents · over MCP</text>
+
+  <!-- Grain overlay -->
+  <rect width="1280" height="640" filter="url(#grain)" opacity="0.03"/>
+
+  <!-- Inner border frame -->
+  <rect x="0.5" y="0.5" width="1279" height="639" rx="0" fill="none" stroke="#ffffff" stroke-opacity="0.05"/>
+</svg>
