@@ -6,7 +6,7 @@
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-8b6cff?style=for-the-badge"></a>
   <img alt="MCP ready" src="https://img.shields.io/badge/MCP-ready-5dd1ff?style=for-the-badge">
   <img alt="28 MCP tools" src="https://img.shields.io/badge/tools-28-8b6cff?style=for-the-badge">
-  <img alt="CI passing" src="https://img.shields.io/badge/tests-passing-5dd1ff?style=for-the-badge">
+  <a href="https://github.com/Gamino17/AMI/actions/workflows/test.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Gamino17/AMI/test.yml?style=for-the-badge&label=tests&color=5dd1ff"></a>
   <img alt="Made with Python" src="https://img.shields.io/badge/python-3.11%20%7C%203.12-8b6cff?style=for-the-badge&logo=python&logoColor=white">
   <a href="https://protocolami.com"><img alt="Live" src="https://img.shields.io/badge/live-protocolami.com-5dd1ff?style=for-the-badge"></a>
 </p>
